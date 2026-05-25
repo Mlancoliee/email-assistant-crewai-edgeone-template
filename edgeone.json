@@ -1,0 +1,23 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "agents": {
+    "scene": ["process"],
+    "tags": ["CrewAI", "LangGraph", "多 Agent", "人机协作"],
+    "runtime": "python",
+    "slug": "email-assistant",
+    "framework": "langgraph",
+    "timeout": 1800
+  },
+  "agent": {
+    "schedules": [
+      {
+        "name": "morning-digest",
+        "cron": "0 8 * * *",
+        "path": "/email/scheduled",
+        "payload": { "task": "daily_digest" },
+        "timeout": 600
+      }
+    ]
+  }
+}

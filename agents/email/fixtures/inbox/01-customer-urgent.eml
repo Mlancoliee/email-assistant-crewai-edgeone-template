@@ -1,0 +1,22 @@
+From: BigClient Ops <ops@bigclient.com>
+To: Mike <Mike@example.com>
+Subject: [URGENT] Production 500 errors on /api/orders endpoint
+Date: Tue, 19 May 2026 09:42:00 +0800
+Message-ID: <urgent-prod-500-20260519@bigclient.com>
+Content-Type: text/plain; charset=utf-8
+
+Hi Mike,
+
+We're seeing a spike of HTTP 500 errors on the /api/orders endpoint, starting
+about 15 minutes ago. Roughly 12% of our checkout traffic is failing — this
+is impacting live revenue.
+
+I've attached a screenshot of our APM dashboard. The errors all trace back to
+your service's POST /v2/orders/create call timing out at 30 s.
+
+Can you (or someone on call) take a look ASAP? I can be reached at +86 138
+xxxx xxxx if you need to discuss live.
+
+Thanks,
+Wei
+Ops Lead, BigClient

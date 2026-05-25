@@ -1,0 +1,13 @@
+{
+  "vip_domains": [
+    "vipcustomer.com",
+    "bigclient.com"
+  ],
+  "auto_archive": [
+    "news@tool.io",
+    "winner@lucky-draw.xyz"
+  ],
+  "default_tone": "friendly_professional",
+  "signature": "——  Your Name / Your Company",
+  "language": "zh-CN"
+}

@@ -1,0 +1,16 @@
+From: Mike <Mike@example.com>
+To: Sales <sales@vendor.com>
+Subject: Re: Your demo request
+Date: Wed, 15 Apr 2026 14:22:00 +0800
+
+Hi Tomás,
+
+Thanks for the follow-up. We took another look at your platform last week
+but ended up sticking with our current setup for now — the integration
+overhead just doesn't pencil out at our scale right now.
+
+If anything changes on your end (especially the SSO + audit log piece we
+talked about), happy to revisit in Q4.
+
+Best,
+—— Mike

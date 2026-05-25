@@ -1,0 +1,25 @@
+From: CTO <cto@company.com>
+To: All Engineering <eng-all@company.com>
+Subject: [Weekly] Engineering Update — Week 20
+Date: Fri, 16 May 2026 18:30:00 +0800
+Message-ID: <weekly-eng-w20-20260516@company.com>
+Content-Type: text/plain; charset=utf-8
+
+Team,
+
+This is the weekly digest. No action needed — read at your leisure.
+
+Highlights:
+  - Migration to the new auth gateway hit 92% rollout. Final 8% are
+    legacy mobile clients; we'll force-cut on June 3.
+  - The platform team shipped the new sandbox runtime; benchmarks show
+    a 2.3× cold-start improvement.
+  - We're hiring two more SREs; refer aggressively.
+
+Numbers:
+  - p95 API latency: 84 ms (▼ 6 ms WoW)
+  - On-call pages: 11 (5 actionable, 6 noise)
+  - Deploys to prod: 47
+
+Have a good weekend.
+— CTO

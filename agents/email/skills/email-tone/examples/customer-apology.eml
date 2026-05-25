@@ -1,0 +1,18 @@
+From: Mike <Mike@example.com>
+To: BigClient Ops <ops@bigclient.com>
+Subject: Re: [URGENT] Production 500 errors on /api/orders endpoint
+Date: Tue, 19 May 2026 09:55:00 +0800
+
+Hi Wei,
+
+抱歉给你们带来这个困扰 — 我们这边也看到了告警,正在紧急排查。
+
+当前状态:
+- 已锁定问题来自数据库连接池上周的配置变更
+- SRE 正在回滚,预计 10 分钟内恢复
+- 目前已影响约 12% 的订单流量,我们会在恢复后立刻发一份事后分析
+
+如果有任何特别紧急的客户单子卡在这上面,直接发给我我手动跟进。我会在 11:00
+前再发一封邮件确认全恢复。
+
+—— Mike

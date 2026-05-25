@@ -1,0 +1,51 @@
+From: Lin Chen <pm@partner.com>
+To: Mike <Mike@example.com>, Lily <lily@company.com>
+Subject: Q3 Roadshow Sync — Friday 15:00
+Date: Mon, 18 May 2026 16:20:00 +0800
+Message-ID: <meeting-q3-roadshow-20260518@partner.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="boundary42"
+
+--boundary42
+Content-Type: text/plain; charset=utf-8
+
+Hi all,
+
+Sending an invite for our Q3 roadshow alignment this Friday at 15:00–16:00
+(GMT+8). Agenda will cover:
+
+  1. Q2 retrospective — what worked, what to drop
+  2. Q3 narrative draft + KPIs
+  3. Allocations across BD / Marketing / Customer Success
+
+Please come prepared with your team's top-3 priorities. The meeting bridge is
+attached as an .ics; let me know if the time doesn't work and I'll find a
+slot the week of May 26.
+
+Best,
+Lin
+
+--boundary42
+Content-Type: text/calendar; method=REQUEST; name="invite.ics"
+Content-Transfer-Encoding: 7bit
+Content-Disposition: attachment; filename="invite.ics"
+
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Partner Corp//Roadshow//EN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:roadshow-q3-20260522@partner.com
+DTSTAMP:20260518T082000Z
+DTSTART:20260522T070000Z
+DTEND:20260522T080000Z
+SUMMARY:Q3 Roadshow Sync
+ORGANIZER:mailto:pm@partner.com
+ATTENDEE:mailto:Mike@example.com
+ATTENDEE:mailto:lily@company.com
+LOCATION:Zoom (link in description)
+DESCRIPTION:Quarterly alignment for the Q3 roadshow narrative.
+END:VEVENT
+END:VCALENDAR
+
+--boundary42--

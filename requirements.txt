@@ -1,0 +1,16 @@
+# LangGraph + CrewAI core. Versions match what the platform bundles
+# (.edgeone/agent-python/lib/) and the sibling templates so the deploy-time
+# resolver doesn't conflict.
+crewai>=1.14.5
+langgraph>=1.0.0
+langgraph-checkpoint>=2.0.0
+pydantic>=2.0.0
+
+# Real-mailbox path (EMAIL_PROVIDER=imap). Default mock provider doesn't
+# need this, but keeping it required so a single `pip install -r` covers
+# both modes.
+imap-tools>=1.7.0
+
+# OpenAI client used by the LangGraph nodes (classify / summarize) for
+# direct chat completion against the platform AI Gateway.
+openai>=1.50.0

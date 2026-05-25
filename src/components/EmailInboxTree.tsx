@@ -1,0 +1,564 @@
+/**
+ * EmailInboxTree — left column.
+ *
+ * Renders the classified inbox grouped by category with priority badges.
+ * Highlights the email currently under review (matched by ``activeEmailId``).
+ *
+ * The component is purely presentational — it ingests an array of
+ * ClassifiedEmail (built up incrementally as state_update frames stream
+ * in from the backend) and renders them grouped + sorted by priority.
+ */
+import { ClassifiedEmail, EmailCategory } from '../types';
+import { tokens } from '../design-tokens';
+import { Icon, IconName } from '../icons';
+
+interface Props {
+  emails: ClassifiedEmail[];
+  activeEmailId?: string | null;
+  doneEmailIds?: ReadonlySet<string>;
+  /**
+   * True while a new run is in flight and the displayed list is from a
+   * previous run. We keep the old data on screen rather than flashing back
+   * to the empty state — the small banner tells the user a refresh is
+   * happening, and the list updates as soon as classify+prioritize complete.
+   */
+  refreshing?: boolean;
+  /** Number of emails fetched on the current run. Used in conjunction with
+   * ``classifying`` to render an "已拉取 N 封,正在分类..." transitional
+   * state — bridges the visual gap between fetch:done and classify:done. */
+  fetchedCount?: number;
+  /** True iff fetch is done but classify hasn't produced data yet. Lets the
+   * empty state explain "we have N emails, just hold on for categorization"
+   * instead of misleading the user with "等待拉取邮件". */
+  classifying?: boolean;
+  /**
+   * If provided, every classified row gets an inline "↩ 处理" button that
+   * calls this with the email id — entry point for single-reply mode.
+   * Hidden when the email is already done or currently under review.
+   */
+  onProcessSingle?: (emailId: string) => void;
+  /** Disables the per-row action button (e.g. while a run is in flight). */
+  actionsDisabled?: boolean;
+}
+
+const CATEGORY_LABEL: Record<EmailCategory, string> = {
+  urgent_customer: '紧急客户',
+  meeting: '会议',
+  internal: '内部',
+  marketing: '营销',
+  notification: '通知',
+  followup: '跟进',
+  spam: '垃圾',
+  billing: '账单',
+  other: '其他',
+};
+
+const CATEGORY_ICON: Record<EmailCategory, IconName> = {
+  urgent_customer: 'siren',
+  meeting: 'calendar',
+  internal: 'briefcase',
+  marketing: 'megaphone',
+  notification: 'bell',
+  followup: 'rotate-ccw',
+  spam: 'trash-2',
+  billing: 'receipt',
+  other: 'folder',
+};
+
+const CATEGORY_COLOR: Record<EmailCategory, string> = {
+  urgent_customer: tokens.color.categoryUrgent,
+  meeting: tokens.color.categoryMeeting,
+  internal: tokens.color.categoryInternal,
+  marketing: tokens.color.categoryMarketing,
+  notification: tokens.color.categoryNotification,
+  followup: tokens.color.categoryFollowup,
+  spam: tokens.color.categorySpam,
+  billing: tokens.color.categoryBilling,
+  other: tokens.color.categoryOther,
+};
+
+const CATEGORY_ORDER: EmailCategory[] = [
+  'urgent_customer',
+  'meeting',
+  'followup',
+  'billing',
+  'internal',
+  'notification',
+  'marketing',
+  'other',
+  'spam',
+];
+
+export default function EmailInboxTree({
+  emails,
+  activeEmailId,
+  doneEmailIds,
+  refreshing,
+  fetchedCount,
+  classifying,
+  onProcessSingle,
+  actionsDisabled,
+}: Props) {
+  if (emails.length === 0) {
+    // Three states for the empty list, in priority order:
+    //   1. classifying: we already have raw fetched count, just waiting on the
+    //      LLM. Most informative state for the user.
+    //   2. refreshing: a run is in flight (fetch hasn't returned yet).
+    //   3. idle: the canonical "click a button to start" prompt.
+    const title = classifying
+      ? `已拉取 ${fetchedCount ?? 0} 封,正在分类...`
+      : refreshing
+      ? '正在拉取邮件...'
+      : '等待拉取邮件';
+    const hint = classifying
+      ? '后端正在用 LLM 给每封邮件打类别和优先级,几秒后会列出来'
+      : refreshing
+      ? '后端正在从你的邮箱获取最新内容'
+      : '点击上方「仅分类」或「处理待回邮件」开始';
+    return (
+      <aside style={shell}>
+        <h2 style={heading}>
+          <Icon name="inbox" size={14} />
+          <span>收件箱</span>
+        </h2>
+        <div style={emptyState}>
+          <div style={emptyIcon} aria-hidden>
+            <Icon name="inbox" size={28} />
+          </div>
+          <div style={emptyTitle}>{title}</div>
+          <div style={emptyHint}>{hint}</div>
+        </div>
+      </aside>
+    );
+  }
+
+  const grouped = groupByCategory(emails);
+
+  return (
+    <aside style={shell}>
+      <h2 style={heading}>
+        <Icon name="inbox" size={14} />
+        <span>收件箱</span>
+        <span style={countBadge}>{emails.length}</span>
+      </h2>
+      {refreshing && (
+        <div style={refreshBanner} title="新任务正在重新拉取并分类邮件,完成后会刷新这里">
+          <span style={refreshDot} /> 正在重新拉取...
+        </div>
+      )}
+      <div style={treeWrap}>
+        {CATEGORY_ORDER.filter((c) => grouped[c]?.length).map((cat) => (
+          <CategoryGroup
+            key={cat}
+            category={cat}
+            emails={grouped[cat]!}
+            activeEmailId={activeEmailId}
+            doneEmailIds={doneEmailIds}
+            onProcessSingle={onProcessSingle}
+            actionsDisabled={actionsDisabled}
+          />
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function CategoryGroup({
+  category,
+  emails,
+  activeEmailId,
+  doneEmailIds,
+  onProcessSingle,
+  actionsDisabled,
+}: {
+  category: EmailCategory;
+  emails: ClassifiedEmail[];
+  activeEmailId?: string | null;
+  doneEmailIds?: ReadonlySet<string>;
+  onProcessSingle?: (emailId: string) => void;
+  actionsDisabled?: boolean;
+}) {
+  const sorted = [...emails].sort((a, b) => b.priority - a.priority);
+  return (
+    <section style={catShell}>
+      <header style={{ ...catHeader, color: CATEGORY_COLOR[category] }}>
+        <Icon name={CATEGORY_ICON[category]} size={13} />
+        <span>{CATEGORY_LABEL[category]}</span>
+        <span style={catCount}>{emails.length}</span>
+      </header>
+      <ul style={list}>
+        {sorted.map((c) => (
+          <EmailRow
+            key={c.email.id}
+            classified={c}
+            isActive={c.email.id === activeEmailId}
+            isDone={!!doneEmailIds?.has(c.email.id)}
+            onProcess={onProcessSingle}
+            actionsDisabled={actionsDisabled}
+          />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function EmailRow({
+  classified,
+  isActive,
+  isDone,
+  onProcess,
+  actionsDisabled,
+}: {
+  classified: ClassifiedEmail;
+  isActive: boolean;
+  isDone: boolean;
+  onProcess?: (emailId: string) => void;
+  actionsDisabled?: boolean;
+}) {
+  const senderRaw = classified.email.from || classified.email.from_ || '';
+  const sender = friendlyName(senderRaw);
+  // Inline action: show on every classified row so the user can force a
+  // single-reply pipeline on ANY email. We deliberately don't gate on
+  // ``needs_reply`` — real inboxes (especially IMAP) often have the LLM
+  // mark everything as needs_reply=false (Gmail security alerts, vendor
+  // welcome emails, etc.), which would hide the button entirely. Hiding
+  // only the row that's already done or currently under review keeps the
+  // UI honest without artificial restrictions.
+  const showAction = !!onProcess && !isDone && !isActive;
+  return (
+    <li
+      title={classified.reason || classified.email.subject}
+      style={{
+        ...row,
+        background: isActive
+          ? tokens.color.brandSoft
+          : isDone
+          ? tokens.color.successSoft
+          : tokens.color.bg,
+        borderColor: isActive
+          ? tokens.color.brandBorder
+          : isDone
+          ? '#bbf7d0'
+          : 'transparent',
+        boxShadow: isActive ? tokens.shadow.focus : undefined,
+      }}
+    >
+      <div style={rowTop}>
+        <PriorityBadge n={classified.priority} reply={classified.needs_reply} />
+        <span style={subjectClip}>{classified.email.subject}</span>
+      </div>
+      <div style={rowBottom}>
+        <span style={senderClip}>{sender}</span>
+        {isDone && (
+          <span style={doneTag}>
+            <Icon name="check" size={10} strokeWidth={2.5} />
+            <span>已处理</span>
+          </span>
+        )}
+        {isActive && <span style={activeTag}>审批中</span>}
+        {showAction && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onProcess?.(classified.email.id);
+            }}
+            disabled={actionsDisabled}
+            style={{
+              ...processBtn,
+              opacity: actionsDisabled ? 0.4 : 1,
+              cursor: actionsDisabled ? 'not-allowed' : 'pointer',
+            }}
+            title="单独处理这一封邮件(跳过其它)"
+          >
+            <Icon name="corner-down-left" size={11} strokeWidth={2} />
+            <span>处理</span>
+          </button>
+        )}
+      </div>
+    </li>
+  );
+}
+
+function PriorityBadge({ n, reply }: { n: number; reply: boolean }) {
+  let color: string = tokens.color.textSubtle;
+  let bg: string = tokens.color.surface;
+  if (n >= 80) {
+    color = tokens.color.danger;
+    bg = tokens.color.dangerSoft;
+  } else if (n >= 50) {
+    color = tokens.color.warning;
+    bg = tokens.color.warningSoft;
+  } else if (n >= 30) {
+    color = tokens.color.info;
+    bg = tokens.color.infoSoft;
+  }
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        padding: '2px 6px',
+        borderRadius: tokens.radius.sm,
+        background: bg,
+        fontFamily: tokens.font.mono,
+        fontSize: tokens.fontSize.xs,
+        color,
+        fontWeight: tokens.fontWeight.semibold,
+        minWidth: 36,
+        justifyContent: 'center',
+      }}
+      title={reply ? '需要回复' : '不需要回复'}
+    >
+      {reply && <Icon name="corner-down-left" size={9} strokeWidth={2.5} />}
+      <span>{n}</span>
+    </span>
+  );
+}
+
+function friendlyName(raw: string): string {
+  // "Alice <alice@x.com>" → "Alice"
+  const m = raw.match(/^([^<]+?)\s*<.*>$/);
+  if (m) return m[1].trim();
+  // "alice@x.com" → "alice"
+  const at = raw.indexOf('@');
+  if (at > 0) return raw.slice(0, at);
+  return raw;
+}
+
+function groupByCategory(emails: ClassifiedEmail[]): Partial<Record<EmailCategory, ClassifiedEmail[]>> {
+  const out: Partial<Record<EmailCategory, ClassifiedEmail[]>> = {};
+  for (const e of emails) {
+    (out[e.category] ||= []).push(e);
+  }
+  return out;
+}
+
+// ─── styles ─────────────────────────────────────────────────────────────────
+
+const shell: React.CSSProperties = {
+  flex: 1,
+  minHeight: 0,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: tokens.space[3],
+  padding: tokens.space[3],
+  background: tokens.color.surface,
+  borderRight: `1px solid ${tokens.color.border}`,
+  overflowY: 'auto',
+  minWidth: 0,
+};
+
+const heading: React.CSSProperties = {
+  margin: 0,
+  fontSize: tokens.fontSize.sm,
+  fontWeight: tokens.fontWeight.semibold,
+  color: tokens.color.textMuted,
+  display: 'flex',
+  alignItems: 'center',
+  gap: tokens.space[2],
+  textTransform: 'uppercase',
+  letterSpacing: '0.06em',
+  paddingBottom: tokens.space[2],
+  marginBottom: tokens.space[2],
+};
+
+const countBadge: React.CSSProperties = {
+  marginLeft: 'auto',
+  background: tokens.color.brandSoft,
+  color: tokens.color.brand,
+  fontFamily: tokens.font.mono,
+  fontSize: tokens.fontSize.xs,
+  padding: '1px 8px',
+  borderRadius: tokens.radius.pill,
+  fontWeight: tokens.fontWeight.semibold,
+  letterSpacing: 0,
+};
+
+const emptyState: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  gap: 6,
+  color: tokens.color.textSubtle,
+  padding: `${tokens.space[6]}px ${tokens.space[3]}px`,
+  textAlign: 'center',
+};
+
+const emptyIcon: React.CSSProperties = {
+  width: 44,
+  height: 44,
+  borderRadius: tokens.radius.lg,
+  background: tokens.color.surface,
+  border: `1px dashed ${tokens.color.borderStrong}`,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  color: tokens.color.textDisabled,
+  marginBottom: 6,
+};
+
+const emptyTitle: React.CSSProperties = {
+  fontSize: tokens.fontSize.sm,
+  fontWeight: tokens.fontWeight.semibold,
+  color: tokens.color.textMuted,
+};
+
+const emptyHint: React.CSSProperties = {
+  fontSize: tokens.fontSize.xs,
+  color: tokens.color.textSubtle,
+  lineHeight: 1.5,
+};
+
+const refreshBanner: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: tokens.space[2],
+  margin: `0 0 ${tokens.space[3]} 0`,
+  padding: `${tokens.space[2]} ${tokens.space[3]}`,
+  fontSize: tokens.fontSize.xs,
+  color: tokens.color.brand,
+  background: 'rgba(124, 92, 240, 0.08)',
+  border: `1px solid rgba(124, 92, 240, 0.18)`,
+  borderRadius: tokens.radius.sm,
+};
+
+const refreshDot: React.CSSProperties = {
+  width: 6,
+  height: 6,
+  borderRadius: '50%',
+  background: tokens.color.brand,
+  animation: 'pulse 1.4s ease-in-out infinite',
+  display: 'inline-block',
+};
+
+const treeWrap: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: tokens.space[3],
+};
+
+const catShell: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: tokens.space[1],
+};
+
+const catHeader: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  fontSize: tokens.fontSize.xs,
+  fontWeight: tokens.fontWeight.semibold,
+  textTransform: 'uppercase',
+  letterSpacing: '0.04em',
+  padding: `0 ${tokens.space[1]}px`,
+};
+
+const catCount: React.CSSProperties = {
+  marginLeft: 'auto',
+  fontFamily: tokens.font.mono,
+  color: tokens.color.textSubtle,
+  fontWeight: tokens.fontWeight.regular,
+  letterSpacing: 0,
+  textTransform: 'none',
+};
+
+const list: React.CSSProperties = {
+  listStyle: 'none',
+  margin: 0,
+  padding: 0,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 2,
+};
+
+const row: React.CSSProperties = {
+  padding: `${tokens.space[2]}px ${tokens.space[2]}px`,
+  borderRadius: tokens.radius.md,
+  cursor: 'default',
+  transition: tokens.motion.fast,
+  border: '1px solid transparent',
+};
+
+const rowTop: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: tokens.space[2],
+  fontSize: tokens.fontSize.base,
+  color: tokens.color.text,
+};
+
+const rowBottom: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  // gap (not space-between) so the button always lives at the very end —
+  // ``space-between`` distributes children evenly when there's >2, which
+  // made the button's position drift depending on how many tags showed.
+  gap: tokens.space[2],
+  marginLeft: 38,
+  marginTop: 1,
+  fontSize: tokens.fontSize.xs,
+  color: tokens.color.textSubtle,
+};
+
+const subjectClip: React.CSSProperties = {
+  flex: 1,
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  minWidth: 0,
+};
+
+const senderClip: React.CSSProperties = {
+  // flex: 1 + minWidth: 0 = the sender line collapses with ellipsis instead
+  // of pushing siblings (especially the "↩ 处理" button) off the right edge.
+  flex: 1,
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  minWidth: 0,
+};
+
+const doneTag: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 3,
+  color: tokens.color.success,
+  fontFamily: tokens.font.mono,
+  fontSize: 10,
+  fontWeight: tokens.fontWeight.semibold,
+  padding: '2px 6px',
+  background: '#dcfce7',
+  borderRadius: tokens.radius.sm,
+};
+
+const activeTag: React.CSSProperties = {
+  color: tokens.color.brand,
+  fontFamily: tokens.font.mono,
+  fontSize: 10,
+  fontWeight: tokens.fontWeight.semibold,
+  padding: '2px 6px',
+  background: tokens.color.brandSoft,
+  border: `1px solid ${tokens.color.brandBorder}`,
+  borderRadius: tokens.radius.sm,
+};
+
+const processBtn: React.CSSProperties = {
+  // Filled chip-style — background color makes it actually noticeable
+  // against the row's white background. Previous "transparent + 1px border"
+  // styling blended in too much.
+  marginLeft: 'auto',
+  padding: '3px 8px',
+  fontSize: 11,
+  fontFamily: tokens.font.mono,
+  fontWeight: tokens.fontWeight.semibold,
+  color: 'white',
+  background: tokens.color.brand,
+  border: 'none',
+  borderRadius: 4,
+  whiteSpace: 'nowrap',
+  flexShrink: 0,
+  lineHeight: 1.2,
+};

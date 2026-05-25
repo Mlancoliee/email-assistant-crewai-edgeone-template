@@ -1,0 +1,22 @@
+From: SaaS Billing <billing@saas.com>
+To: Mike <Mike@example.com>
+Subject: 您的 5 月发票 ¥2,340.00
+Date: Sun, 18 May 2026 00:01:00 +0800
+Message-ID: <invoice-2026-05-20260518@saas.com>
+Content-Type: text/plain; charset=utf-8
+
+您好,
+
+您 2026 年 5 月的服务发票已生成,详情如下:
+
+  发票号:  INV-2026-05-009827
+  账期:    2026-04-19 至 2026-05-18
+  金额:    ¥2,340.00 (含税)
+  到期日:  2026-06-02
+  支付方式:已绑定信用卡(尾号 1234),将于 5/28 自动扣款
+
+发票 PDF 可在控制台 → 账务 → 发票 中下载。
+
+如对账单有任何疑问,请回复此邮件或致电 400-xxx-xxxx 工作日 9:00-18:00。
+
+—— SaaS Billing 团队

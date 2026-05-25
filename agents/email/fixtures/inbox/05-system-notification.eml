@@ -1,0 +1,23 @@
+From: GitHub <noreply@github.com>
+To: Mike <Mike@example.com>
+Subject: [yourorg/api-server] PR #421 ready for review
+Date: Mon, 19 May 2026 14:18:00 +0800
+Message-ID: <PR-421-ready-20260519@github.com>
+Content-Type: text/plain; charset=utf-8
+
+A pull request is ready for your review.
+
+  Repository:  yourorg/api-server
+  PR:          #421 — Refactor order service connection pool
+  Author:      @teammate-alex
+  Branch:      alex/refactor-pool → main
+  Files:       +312 / −187 across 18 files
+
+Reviewers requested: @Mike
+
+Open in GitHub:
+https://github.com/yourorg/api-server/pull/421
+
+—
+You can manage notification preferences at:
+https://github.com/settings/notifications

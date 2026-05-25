@@ -1,0 +1,1408 @@
+/**
+ * App — top-level shell. Owns the SSE state machine that drives all three
+ * columns:
+ *   - left  ── EmailInboxTree         (built from state_update.classify / .prioritize)
+ *   - center── ConversationStream     (timeline of messages + inline DraftReviewCard)
+ *   - right ── NodeFlowVisualizer     (per-node status from state_update keys)
+ *
+ * State design notes:
+ *   - `messages` is append-only; older frames stay visible.
+ *   - `nodeStatuses` advances on each state_update (any payload from node X
+ *     means X is now done — LangGraph emits AFTER the node returns).
+ *   - The "active" node is whichever was last started but not yet completed.
+ *     We surface it as ``active``; on `human_review_required` the review
+ *     node flips to ``paused`` instead.
+ *   - Decision echoes happen optimistically before the SSE response so the
+ *     conversation flow doesn't feel laggy.
+ */
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import ChatLayout from './components/ChatLayout';
+import ConversationStream, {
+  StreamMessage,
+  StreamMessageKind,
+} from './components/ConversationStream';
+import EmailInboxTree from './components/EmailInboxTree';
+import HistorySidebar from './components/HistorySidebar';
+import NodeFlowVisualizer from './components/NodeFlowVisualizer';
+import {
+  getConversation,
+  runEmailAssistant,
+  stopRun as apiStopRun,
+  StoredMessage,
+  submitReview,
+} from './api';
+import { Icon, IconSpinner } from './icons';
+import type {
+  ClassifiedEmail,
+  DraftItem,
+  NodeStatus,
+  PipelineNode,
+  ProgressPayload,
+  ReviewDecisionInput,
+  RunTask,
+  SSEFrame,
+} from './types';
+import { tokens } from './design-tokens';
+
+/** Friendly Chinese label per task — matches the backend's append_message
+ * content prefix so a fresh-run session line and a restored-from-history line
+ * read identically in the timeline. */
+const TASK_LABEL: Record<RunTask, string> = {
+  triage_only: '仅分类邮件',
+  daily_digest: '处理待回邮件',
+  single_reply: '单独处理某封邮件',
+};
+
+const SESSION_ID_KEY = 'email-assistant-conv-id';
+
+/** Read or create a stable conversation_id for this browser session.
+ * Priority: URL ?id= (link sharing) → localStorage → fresh UUID. */
+function getOrCreateSessionId(): string {
+  if (typeof window === 'undefined') return generateConvId();
+  try {
+    const fromUrl = new URLSearchParams(window.location.search).get('id');
+    if (fromUrl) return fromUrl;
+    const fromLs = window.localStorage.getItem(SESSION_ID_KEY);
+    if (fromLs) return fromLs;
+  } catch {
+    // localStorage may throw in incognito/sandbox; ignore.
+  }
+  return generateConvId();
+}
+
+function generateConvId(): string {
+  return `email-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** Persist the active conversation id to localStorage AND the URL bar so
+ * the user can copy-paste the link to resume the same session later. */
+function persistSessionId(id: string): void {
+  try {
+    window.localStorage.setItem(SESSION_ID_KEY, id);
+  } catch {
+    /* noop */
+  }
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set('id', id);
+    window.history.replaceState(null, '', url);
+  } catch {
+    /* noop */
+  }
+}
+
+/** Map a stored message (from /email/history) into a timeline StreamMessage.
+ * The backend writes role + metadata.kind, we map both into our frontend
+ * StreamMessageKind enum so the bubble styling matches what the user saw
+ * during the original run. */
+function storedToStreamMessage(m: StoredMessage, idx: number): StreamMessage {
+  const role = (m.role || '').toLowerCase();
+  const meta = (m.metadata || {}) as Record<string, unknown>;
+  const kindHint = String(meta.kind || '');
+  let kind: StreamMessageKind = 'system';
+  if (role === 'user') {
+    kind = kindHint === 'decision' ? 'decision' : 'session';
+  } else if (role === 'assistant') {
+    kind = kindHint === 'summary' ? 'summary' : 'review';
+  }
+  const text = typeof m.content === 'string' ? m.content : '';
+  return {
+    id: m.message_id ?? m.messageId ?? `restored-${idx}`,
+    ts: m.createdAt ?? m.created_at ?? Date.now(),
+    kind,
+    text,
+  };
+}
+
+interface PendingDraft {
+  draft: DraftItem;
+  remaining: number;
+}
+
+// ─── Reducer for pipeline state derived from SSE frames ─────────────────────
+
+interface PipelineState {
+  classified: ClassifiedEmail[];
+  doneEmailIds: Set<string>;
+  activeEmailId: string | null;
+  nodeStatuses: Partial<Record<PipelineNode, NodeStatus>>;
+  /** Per-run progress counters. Reset on every ``reset`` action so the
+   * "X / Y" indicator never spans runs (avoids the 2/4 → 5/3 jump that
+   * happened when daily_digest re-derived totals after single_reply). */
+  runIteration: number;
+  runTotal: number;
+  /** Nodes whose payload included ``_cached: true`` THIS run — rendered as
+   * "缓存" pills in the pipeline column instead of ✓ done. Reset per-run. */
+  cachedNodes: Set<PipelineNode>;
+  /** Snapshot of fetch.inbox.length, used to render
+   * "已拉取 X 封,正在分类..." while classify is still running. Reset per-run. */
+  fetchedCount: number;
+  /** True once classify and prioritize have produced data for this run.
+   * Subsequent re-emissions (e.g. when the backend re-runs the full pipeline
+   * on resume — a known LangGraph quirk) are ignored to keep the UI stable. */
+  scoresLocked: boolean;
+  /** Current task — drives reducer behavior (e.g. ``single_reply`` should NOT
+   * overwrite ``classified``: it only touches one email). */
+  currentTask: RunTask | null;
+}
+
+const INITIAL_PIPELINE: PipelineState = {
+  classified: [],
+  doneEmailIds: new Set(),
+  activeEmailId: null,
+  nodeStatuses: {},
+  runIteration: 0,
+  runTotal: 0,
+  cachedNodes: new Set(),
+  fetchedCount: 0,
+  scoresLocked: false,
+  currentTask: null,
+};
+
+type PipelineAction =
+  | { type: 'reset'; task: RunTask; clearDone?: boolean; clearClassified?: boolean }
+  | { type: 'state_update'; payload: Record<string, unknown> }
+  | { type: 'paused'; emailId: string }
+  | { type: 'decision'; emailId: string }
+  | { type: 'regenerate'; emailId: string }
+  | { type: 'error' }
+  /** Hydrate the inbox + done markers from a restored conversation snapshot.
+   * Used when the user clicks a row in HistorySidebar — we drop the run-level
+   * counters back to 0 (no run is in flight) but keep the persisted classified
+   * + per-row "✓" markers so the UI matches what they had when they left.
+   *
+   * ``pausedAtReview``: when set, the graph was at an HITL interrupt when
+   * the user closed/refreshed the tab. We seed runIteration/runTotal so the
+   * "X / Y" counter is accurate, mark fetch through draft as done and review
+   * as paused, and stamp activeEmailId so the left column highlights the
+   * row matching the resumed draft. The DraftReviewCard itself is brought
+   * back via ``setPending`` in the caller. */
+  | {
+      type: 'restore';
+      classified: ClassifiedEmail[];
+      doneEmailIds: ReadonlySet<string>;
+      pausedAtReview?: { emailId: string; iteration: number; total: number };
+    };
+
+function pipelineReducer(state: PipelineState, action: PipelineAction): PipelineState {
+  switch (action.type) {
+    case 'reset':
+      // Carry over the inbox snapshot AND the per-session "✓ done" markers
+      // from previous runs by default — multi-step workflows (e.g. several
+      // single_reply clicks in a row) accumulate progress instead of
+      // wiping the left column. ``clearClassified`` opts out for "force
+      // refresh" (we want fresh data, not the old snapshot to keep
+      // showing) and "新会话" (true fresh slate). ``clearDone`` is a
+      // separate axis — also forced by both opt-out flows.
+      //
+      // Per-run fields (runIteration / runTotal / cachedNodes / fetchedCount)
+      // are ALWAYS reset so the progress indicator reflects only the current
+      // run. This avoids the cross-run "2 of 4 → 5 of 3" math glitch.
+      return {
+        ...INITIAL_PIPELINE,
+        classified: action.clearClassified ? [] : state.classified,
+        doneEmailIds: action.clearDone ? new Set() : state.doneEmailIds,
+        currentTask: action.task,
+      };
+    case 'state_update': {
+      // LangGraph stream_mode="updates" emits {nodeName: {…patch…}} per step.
+      const next = {
+        ...state,
+        nodeStatuses: { ...state.nodeStatuses },
+        cachedNodes: new Set(state.cachedNodes),
+      };
+      // single_reply runs only touch one email — they must not overwrite
+      // the inbox-wide snapshot (classified) coming from a previous broader
+      // run. Otherwise the left column would shrink to just the one email.
+      const isSingle = state.currentTask === 'single_reply';
+      for (const [nodeName, patch] of Object.entries(action.payload)) {
+        // Mark this node done…
+        next.nodeStatuses[nodeName as PipelineNode] = 'done';
+        if (!patch || typeof patch !== 'object') continue;
+        const p = patch as Record<string, unknown>;
+        // Backend short-circuit signal — fetch / classify return ``_cached:
+        // true`` when they reused state["classified"] instead of doing real
+        // work. Track per-node so the visualizer can render a "缓存" pill.
+        if (p._cached === true) {
+          next.cachedNodes.add(nodeName as PipelineNode);
+        }
+        // Capture inbox count from fetch (works for both cache hits AND
+        // real fetches). Used by EmailInboxTree's transition state — we
+        // can show "已拉取 N 封, 正在分类..." while classify is still busy.
+        if (nodeName === 'fetch' && Array.isArray(p.inbox)) {
+          next.fetchedCount = (p.inbox as unknown[]).length;
+        }
+        // Lock priorities + classified after the FIRST classify+prioritize.
+        // The backend may re-emit these on resume (LLM is non-deterministic
+        // → priority scores would jitter; total may differ across runs).
+        if (!state.scoresLocked && !isSingle) {
+          if (Array.isArray(p.classified)) {
+            next.classified = p.classified as ClassifiedEmail[];
+          }
+          if (Array.isArray(p.prioritized)) {
+            const byId = new Map(next.classified.map((c) => [c.email.id, c]));
+            for (const pri of p.prioritized as ClassifiedEmail[]) {
+              byId.set(pri.email.id, pri);
+            }
+            next.classified = Array.from(byId.values());
+            next.scoresLocked = true;
+          }
+        }
+        // runTotal: set ONCE per run from the first prioritize emission.
+        // Locked thereafter — the cursor field grows as the user makes
+        // decisions, runTotal stays put for stable "X / Y" display.
+        if (
+          next.runTotal === 0 &&
+          nodeName === 'prioritize' &&
+          Array.isArray(p.prioritized)
+        ) {
+          next.runTotal = (p.prioritized as ClassifiedEmail[]).length;
+        }
+        // cursor (from apply node) → runIteration. Authoritative source.
+        if (typeof p.cursor === 'number') {
+          next.runIteration = p.cursor;
+        }
+      }
+      return next;
+    }
+    case 'paused':
+      // Reset later-stage nodes whenever we pause for review. Without
+      // this, a previous iteration's "summarize/done" or "apply/done" can
+      // linger and make the right column show contradictory state
+      // (summarize ✓ AND review ⏸ at the same time).
+      return {
+        ...state,
+        nodeStatuses: {
+          ...state.nodeStatuses,
+          review: 'paused',
+          // 'apply' / 'summarize' / 'draft' belong to the iteration AFTER
+          // the user decides — keep them clean for accurate visuals.
+          apply: 'pending',
+          summarize: 'pending',
+        },
+        activeEmailId: action.emailId,
+      };
+    case 'decision':
+      return {
+        ...state,
+        activeEmailId: null,
+        doneEmailIds: new Set([...state.doneEmailIds, action.emailId]),
+        // Optimistic bump — the backend's apply will emit cursor and
+        // overwrite this anyway, but bumping here makes the "X / Y"
+        // counter feel snappy. (regenerate path doesn't bump — see below.)
+        runIteration: state.runIteration + 1,
+        // After the user submits, the next stream from review.py will
+        // re-emit state_update for review/apply nodes; mark review back to
+        // active so it doesn't look stuck on "paused".
+        nodeStatuses: { ...state.nodeStatuses, review: 'active' },
+      };
+    case 'regenerate':
+      // Regenerate keeps the SAME email active — backend will produce a new
+      // draft for it. Critical: doneEmailIds and runIteration are NOT updated
+      // (the email isn't done yet) so the progress counter doesn't jump.
+      return {
+        ...state,
+        activeEmailId: action.emailId,
+        nodeStatuses: { ...state.nodeStatuses, review: 'active', draft: 'active' },
+      };
+    case 'error':
+      return {
+        ...state,
+        nodeStatuses: { ...state.nodeStatuses, ...errorStuckNode(state.nodeStatuses) },
+      };
+    case 'restore': {
+      // Wipe to a clean slate but keep the snapshot fields the user expects
+      // to still see when they click a past conversation in HistorySidebar.
+      // No run is in flight, so counters / cached-node flags / fetched count
+      // start at zero — the next click on "处理待回邮件" will populate them.
+      //
+      // ``scoresLocked: true`` because we DO have a snapshot — without it,
+      // the toolbar's "强制刷新" button hides (gated on scoresLocked &&
+      // classified.length > 0). Force refresh issues a 'reset' first which
+      // flips scoresLocked back to false, so the next live prioritize emit
+      // can overwrite the restored data with fresh data.
+      const base: PipelineState = {
+        ...INITIAL_PIPELINE,
+        classified: action.classified,
+        doneEmailIds: new Set(action.doneEmailIds),
+        scoresLocked: action.classified.length > 0,
+      };
+      // ``pausedAtReview``: graph was paused at HITL when the tab was closed.
+      // Re-seed the per-run counters and node statuses so the UI matches what
+      // the user left behind: pipeline shows "fetch ✓ classify ✓ prioritize ✓
+      // draft ✓ review ⏸", counter shows X / Y, and the row of the email
+      // currently being reviewed lights up in the left column.
+      if (action.pausedAtReview) {
+        return {
+          ...base,
+          activeEmailId: action.pausedAtReview.emailId,
+          runIteration: action.pausedAtReview.iteration,
+          runTotal: action.pausedAtReview.total,
+          nodeStatuses: {
+            fetch: 'done',
+            classify: 'done',
+            prioritize: 'done',
+            draft: 'done',
+            review: 'paused',
+            apply: 'pending',
+            summarize: 'pending',
+          },
+        };
+      }
+      return base;
+    }
+  }
+}
+
+/** Whichever node is currently active becomes the error focal point. */
+function errorStuckNode(
+  cur: Partial<Record<PipelineNode, NodeStatus>>,
+): Partial<Record<PipelineNode, NodeStatus>> {
+  const active = Object.entries(cur).find(([, v]) => v === 'active' || v === 'paused');
+  if (!active) return {};
+  return { [active[0] as PipelineNode]: 'error' };
+}
+
+// ─── Component ──────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [messages, setMessages] = useState<StreamMessage[]>([]);
+  const [pending, setPending] = useState<PendingDraft | null>(null);
+  const [running, setRunning] = useState(false);
+  const [pipeline, dispatchPipeline] = useReducer(pipelineReducer, INITIAL_PIPELINE);
+  /** Stable for the lifetime of a "session" — multiple runs (triage_only,
+   * single_reply, daily_digest) share this conversation_id so LangGraph's
+   * checkpointer can accumulate state via the Annotated[..., add] reducers
+   * (review_decisions, drafts, final_actions). The "新会话" button bumps it. */
+  const conversationIdRef = useRef<string>('');
+  const taskRef = useRef<RunTask | null>(null);
+  // True once we've emitted the per-run "📥 收到 X 封邮件…" summary message —
+  // prevents duplicates if the backend re-emits prioritize on resume.
+  const summaryEmittedRef = useRef(false);
+  // Synchronous mirror of doneEmailIds — used by handleFrame to detect
+  // duplicate human_review_required events without waiting for React's
+  // next render to commit the reducer state.
+  const doneEmailIdsRef = useRef<Set<string>>(new Set());
+  // Show the "checkpoint isn't persisting" warning at most once per run.
+  const checkpointWarningShownRef = useRef(false);
+  /** Bumped to force HistorySidebar to re-fetch — increment after every
+   * run so a brand-new conversation appears in the list immediately. */
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+  /** True while we're hydrating from a past conversation. Disables most
+   * actions to avoid a click race during the round-trip. */
+  const [restoring, setRestoring] = useState(false);
+  /** Drawer open/close state — owned here so we can auto-close after
+   * picking a row or clicking "新会话". */
+  const [historyOpen, setHistoryOpen] = useState(false);
+  /** True after the mount-time restoreSession has resolved. Until then we
+   * keep the conversation column in a loading state — without this gate,
+   * the user sees the OnboardingPanel for ~200ms and then it abruptly
+   * swaps to the restored timeline. */
+  const [initialized, setInitialized] = useState(false);
+  /** Latest narration line emitted by a node (via stream_mode="custom").
+   * Renders as a live chip at the bottom of the conversation column so the
+   * user sees what the backend is doing during long ops (classify ~10s,
+   * draft ~20-30s) instead of staring at a frozen UI. Cleared on stream
+   * end / pause / cancel so we never show a stale "thinking…" message. */
+  const [progress, setProgress] = useState<ProgressPayload | null>(null);
+  /** Token-by-token LLM output for the active phase (currently
+   * ``summarize`` and ``draft``). Renders as a "live writing" bubble in
+   * the conversation column with a blinking cursor, so users watch the
+   * markdown / draft body materialize in real time. Replaced (not
+   * appended-to) when the phase changes — e.g. summarize tokens never
+   * mix with draft tokens. Cleared on the same events as ``progress``. */
+  const [streamingText, setStreamingText] = useState<{
+    phase: 'summarize' | 'draft';
+    text: string;
+  } | null>(null);
+
+  const addMessage = useCallback((msg: Omit<StreamMessage, 'id' | 'ts'>) => {
+    setMessages((prev) => [
+      ...prev,
+      { id: `m-${prev.length}-${Date.now()}`, ts: Date.now(), ...msg },
+    ]);
+  }, []);
+
+  const handleFrame = useCallback(
+    (frame: SSEFrame) => {
+      const ev = frame.event;
+      if (ev === 'session') {
+        // First frame of every stream — only render verbose narration on the
+        // very first `run` (skip resumed sessions to keep the timeline clean).
+        // Use the same Chinese label format as backend's append_message so
+        // restored timelines and live timelines look identical.
+        const payload = (frame.data || {}) as { resumed?: boolean; task?: RunTask };
+        if (!payload.resumed) {
+          const label = payload.task ? TASK_LABEL[payload.task] ?? payload.task : null;
+          addMessage({
+            kind: 'session',
+            text: label ? `[task] ${label}` : '会话已开启',
+          });
+        }
+        return;
+      }
+      if (ev === 'progress' && typeof frame.data === 'object' && frame.data) {
+        const payload = frame.data as ProgressPayload;
+        // ``token`` stage is special — it's a token chunk, not narration.
+        // Accumulate into ``streamingText`` so the conversation column can
+        // render the LLM output as it streams. Reset to a fresh
+        // {phase, text} when the phase changes (e.g. draft tokens don't
+        // mix with the previous run's summarize tokens that haven't been
+        // cleared yet).
+        if (payload.stage === 'token' && payload.delta) {
+          const phase = payload.phase as 'summarize' | 'draft';
+          if (phase !== 'summarize' && phase !== 'draft') return;
+          setStreamingText((prev) => {
+            if (prev && prev.phase === phase) {
+              return { phase, text: prev.text + payload.delta };
+            }
+            return { phase, text: payload.delta || '' };
+          });
+          return;
+        }
+        // Lifecycle event (started / completed / skipped / agent_start / etc.)
+        // — feeds the chip + per-node sub-label. Don't push into messages.
+        setProgress(payload);
+        return;
+      }
+      if (ev === 'state_update' && typeof frame.data === 'object' && frame.data) {
+        const payload = frame.data as Record<string, unknown>;
+        // Skip the LangGraph-internal __interrupt__ event — handled via human_review_required
+        if ('__interrupt__' in payload) return;
+        dispatchPipeline({ type: 'state_update', payload });
+
+        // Surface backend-side warnings/errors from any node patch's
+        // ``errors`` field — e.g. prioritize tells us "target email not in
+        // cached classified, hit force-refresh". Without this surface they
+        // sit silently in state and the user sees a confusing skip-to-summarize.
+        for (const patch of Object.values(payload)) {
+          if (
+            patch &&
+            typeof patch === 'object' &&
+            Array.isArray((patch as { errors?: unknown }).errors)
+          ) {
+            for (const err of (patch as { errors: unknown[] }).errors) {
+              if (typeof err === 'string' && err.trim()) {
+                addMessage({ kind: 'error', text: err });
+              }
+            }
+          }
+        }
+
+        // High-signal task summary — emit ONCE per run when prioritize first
+        // produces results. The right-column NodeFlowVisualizer is the
+        // canonical source for live pipeline status; we don't pollute the
+        // chat timeline with per-node narrations.
+        if (!summaryEmittedRef.current && 'prioritize' in payload) {
+          const prio = (payload.prioritize as { prioritized?: unknown[] }) || {};
+          const classifyNow = (payload.classify as { classified?: unknown[] }) || {};
+          const totalClassified =
+            classifyNow.classified?.length ?? pipeline.classified.length;
+          const needReply = prio.prioritized?.length ?? 0;
+          if (totalClassified > 0) {
+            summaryEmittedRef.current = true;
+            const text =
+              taskRef.current === 'triage_only'
+                ? `📥 已分类 ${totalClassified} 封邮件 — 仅分类模式不会起草回复,左栏可查看分类详情`
+                : taskRef.current === 'single_reply'
+                ? needReply > 0
+                  ? `🎯 单独处理这 1 封邮件,即将起草`
+                  : `🎯 这封邮件没在缓存里 — 试试上方「强制刷新」拉一次`
+                : needReply > 0
+                ? `📥 收到 ${totalClassified} 封邮件,其中 ${needReply} 封需要起草回复 — 接下来会逐封请你审批`
+                : `📥 收到 ${totalClassified} 封邮件,本批没有需要起草回复的`;
+            addMessage({ kind: 'system', text });
+          }
+        }
+        // No per-node pipeline messages — the right column already shows
+        // node status with pulse / done / paused indicators.
+        return;
+      }
+      if (ev === 'human_review_required' && typeof frame.data === 'object' && frame.data) {
+        const payload = frame.data as { draft: DraftItem; remaining?: number; email_id: string };
+        // Pause is the only "stop" that should keep the live chip — but
+        // the backend already emitted the final draft "✅ 草稿就绪" line
+        // right before the interrupt, so the user sees a coherent end-of-
+        // pipeline narration. Clear here so we don't show "正在起草…"
+        // when we actually need approval.
+        setProgress(null);
+        // The streaming draft preview gets replaced by the (much-prettier)
+        // DraftReviewCard the moment we hit interrupt — clear here so the
+        // raw markdown body and the polished card don't overlap visually.
+        setStreamingText(null);
+        // The streaming draft preview gets replaced by the (much-prettier)
+        // DraftReviewCard the moment we hit interrupt — clear here so the
+        // raw markdown body and the polished card don't overlap visually.
+        setStreamingText(null);
+        // Pause is the only "stop" that should keep the live chip — but
+        // the backend already emitted the final draft "✅ 草稿就绪" line
+        // right before the interrupt, so the user sees a coherent end-of-
+        // pipeline narration. Clear here so we don't show "正在起草…"
+        // when we actually need approval.
+        setProgress(null);
+        // Detect a likely backend-side checkpointer issue: the same email
+        // is being asked for review again after the user already decided.
+        // Almost always means the backend lost its checkpoint and re-ran the
+        // pipeline from START. Show the warning once, then keep going.
+        if (
+          doneEmailIdsRef.current.has(payload.email_id) &&
+          !checkpointWarningShownRef.current
+        ) {
+          checkpointWarningShownRef.current = true;
+          addMessage({
+            kind: 'error',
+            text:
+              `⚠ 后端要求重审同一封邮件(${payload.email_id})。\n` +
+              '通常意味着 LangGraph checkpointer 没持久化(本地 dev 默认 in-memory),\n' +
+              '每次请求新进程就丢了之前的状态。\n' +
+              '修复:把 PAGES_BLOB_LOCAL_PERSIST=1 加到环境变量,然后重启 dev server。',
+          });
+        }
+        setPending({ draft: payload.draft, remaining: payload.remaining ?? 0 });
+        dispatchPipeline({ type: 'paused', emailId: payload.email_id });
+        addMessage({
+          kind: 'review',
+          text: `请人工审核:${payload.draft.subject || '(草稿没标题 — 通常是 LLM 没填好,后端会兜底加 Re:)'}`,
+        });
+        return;
+      }
+      if (ev === 'done' && typeof frame.data === 'object' && frame.data) {
+        const payload = frame.data as { summary: string };
+        if (payload.summary) {
+          addMessage({ kind: 'summary', text: payload.summary });
+        }
+        setProgress(null);
+        // The final summary now lives in ``messages`` — the streaming bubble
+        // would be a duplicate render, hide it.
+        setStreamingText(null);
+        return;
+      }
+      if (ev === 'error_message' && typeof frame.data === 'object' && frame.data) {
+        const payload = frame.data as { error: string };
+        dispatchPipeline({ type: 'error' });
+        addMessage({ kind: 'error', text: payload.error || '后端报错' });
+        setProgress(null);
+        setStreamingText(null);
+        return;
+      }
+      if (ev === 'cancelled') {
+        addMessage({ kind: 'system', text: '已取消' });
+        setProgress(null);
+        setStreamingText(null);
+        return;
+      }
+      // [PAUSED] / [DONE] / [CANCELLED] sentinels arrive as raw strings —
+      // we already handled the meaningful events above, so just ignore.
+    },
+    [addMessage],
+  );
+
+  const startRun = useCallback(
+    async (
+      task: RunTask,
+      opts?: { forceRefresh?: boolean; targetEmailId?: string },
+    ) => {
+      // Stable conversation_id across all runs in this browser session —
+      // unchanged by the click. We grabbed it at mount-time. This is what
+      // lets ``review_decisions`` accumulate via LangGraph's add reducer,
+      // so the final summary covers ALL emails handled across triage_only
+      // / single_reply / daily_digest in this session.
+      const cid = conversationIdRef.current;
+      taskRef.current = task;
+      summaryEmittedRef.current = false;
+      // doneEmailIdsRef is the synchronous mirror of doneEmailIds — clear it
+      // ONLY on a force refresh; otherwise we want the per-session "✓ done"
+      // state to accumulate across multi-step single_reply clicks.
+      if (opts?.forceRefresh) {
+        doneEmailIdsRef.current = new Set();
+      }
+      checkpointWarningShownRef.current = false;
+      setRunning(true);
+      // Don't clear messages — timeline accumulates across runs in the same
+      // session. The user clicked "新会话" if they wanted a clean slate.
+      setPending(null);
+      setProgress(null);  // wipe stale chip from a previous run
+      setStreamingText(null); // wipe stale streaming bubble from a previous run
+      setStreamingText(null); // wipe stale streaming bubble from a previous run
+      setProgress(null);  // wipe stale chip from a previous run
+
+      // Snapshot the previously classified inbox BEFORE reset clears the
+      // reducer's lock — we want to feed it to the backend as a cache hint
+      // so fetch + classify can short-circuit. Skipped when the user
+      // explicitly clicks "force refresh" (they want fresh mail).
+      const cached =
+        !opts?.forceRefresh && pipeline.classified.length > 0
+          ? pipeline.classified
+          : undefined;
+
+      // Skip-list: emails the user already processed via earlier
+      // single_reply clicks. Backend prioritize filters them out in
+      // daily_digest mode so we don't re-prompt. Cleared on force refresh.
+      const skipIds =
+        !opts?.forceRefresh && task === 'daily_digest' && pipeline.doneEmailIds.size > 0
+          ? Array.from(pipeline.doneEmailIds)
+          : undefined;
+
+      dispatchPipeline({
+        type: 'reset',
+        task,
+        // Force refresh = wipe stale snapshot so the user actually sees
+        // the result of "fresh fetch from email provider", not the cached
+        // inbox flashing before new data arrives.
+        clearDone: opts?.forceRefresh,
+        clearClassified: opts?.forceRefresh,
+      });
+
+      try {
+        for await (const frame of runEmailAssistant({
+          task,
+          conversationId: cid,
+          preloadedClassified: cached as unknown[] | undefined,
+          targetEmailId: opts?.targetEmailId,
+          skipEmailIds: skipIds,
+          forceRefresh: opts?.forceRefresh,
+        })) {
+          handleFrame(frame);
+        }
+      } catch (e) {
+        addMessage({ kind: 'error', text: (e as Error).message });
+      } finally {
+        setRunning(false);
+        // New conversation entry (or updated metadata) should appear in the
+        // sidebar — bump the refresh key.
+        setHistoryRefreshKey((k) => k + 1);
+      }
+    },
+    [
+      addMessage,
+      handleFrame,
+      pipeline.classified,
+      pipeline.doneEmailIds,
+    ],
+  );
+
+  /** Send a stop signal to the backend for the active conversation. The
+   * SSE generator notices via ``request.signal`` on its next iteration and
+   * exits cleanly; the user sees a "已取消" entry land in the timeline. */
+  const stopCurrentRun = useCallback(async () => {
+    const cid = conversationIdRef.current;
+    if (!cid) return;
+    try {
+      const res = await apiStopRun(cid);
+      addMessage({
+        kind: 'system',
+        text:
+          res.status === 'aborted'
+            ? '⏹ 已发送停止信号 — 后端会在下一个节点边界退出'
+            : '⏹ 没有正在运行的任务可以停止',
+      });
+    } catch (e) {
+      addMessage({ kind: 'error', text: `停止失败: ${(e as Error).message}` });
+    }
+  }, [addMessage]);
+
+  /** Generate a fresh conversation_id and reset all state. The previous
+   * conversation is preserved in the platform's store and remains visible
+   * in HistorySidebar. */
+  const startNewSession = useCallback(() => {
+    if (running) return; // refuse to throw away an in-flight run
+    const fresh = generateConvId();
+    conversationIdRef.current = fresh;
+    persistSessionId(fresh);
+    setMessages([]);
+    setPending(null);
+    setProgress(null);
+    setStreamingText(null);
+    setStreamingText(null);
+    setProgress(null);
+    doneEmailIdsRef.current = new Set();
+    taskRef.current = null;
+    summaryEmittedRef.current = false;
+    checkpointWarningShownRef.current = false;
+    // Brand new conversation — wipe both the inbox snapshot and the done
+    // markers so the user sees a true fresh slate. Without ``clearClassified``
+    // the left column would still show the previous session's emails until
+    // the user triggers a run on the new conv (which would then fetch fresh
+    // and replace).
+    dispatchPipeline({
+      type: 'reset',
+      task: 'triage_only',
+      clearDone: true,
+      clearClassified: true,
+    });
+    setHistoryRefreshKey((k) => k + 1);
+    setHistoryOpen(false); // dismiss drawer once user committed to fresh slate
+  }, [running]);
+
+  /** Switch to a past conversation: hydrate messages + pipeline state from
+   * the platform's stored copy. */
+  const restoreSession = useCallback(
+    async (id: string, opts?: { silent?: boolean }) => {
+      if (running) return; // never swap mid-run
+      if (!id) return;
+      setRestoring(true);
+      try {
+        const detail = await getConversation(id);
+        conversationIdRef.current = id;
+        persistSessionId(id);
+        const restored = detail.messages.map(storedToStreamMessage);
+        setMessages(restored);
+        setPending(null);
+        setProgress(null);
+        setStreamingText(null);
+        setStreamingText(null);
+        setProgress(null);
+        if (detail.state) {
+          const classified =
+            (detail.state.classified as ClassifiedEmail[] | undefined) ?? [];
+          const decisions =
+            (detail.state.review_decisions as
+              | { email_id: string; action: string }[]
+              | undefined) ?? [];
+          const doneIds = new Set(
+            decisions
+              .filter((d) => d.action !== 'regenerate')
+              .map((d) => d.email_id),
+          );
+          doneEmailIdsRef.current = new Set(doneIds);
+
+          // ── HITL resume detection ──
+          // The graph is paused at an interrupt() iff:
+          //   - LangGraph snapshot's ``next`` contains 'review' (the
+          //     interrupt happens INSIDE the review node), AND
+          //   - state.pending_review still holds the unresolved draft.
+          // Both conditions matter: ``next`` alone could be stale
+          // (LangGraph keeps it after error too), and ``pending_review``
+          // alone could be a leftover from a finished run if the apply
+          // node didn't clear it. Combined they're a reliable signal.
+          const nextNodes = detail.nextNodes ?? [];
+          const pausedAtReview = nextNodes.includes('review');
+          const pendingDraft = detail.state.pending_review as
+            | DraftItem
+            | null
+            | undefined;
+
+          if (
+            pausedAtReview &&
+            pendingDraft &&
+            typeof pendingDraft === 'object' &&
+            typeof pendingDraft.email_id === 'string'
+          ) {
+            // Reconstruct counter context from the prioritize snapshot —
+            // total = how many emails this run was supposed to handle,
+            // iteration = how many already finished (the cursor before
+            // apply runs for the current draft). The "X / Y" chip in the
+            // header derives display = iteration + (pending ? 1 : 0), so
+            // setting iteration = cursor and pending non-null lands on
+            // the right "now reviewing #N of M" string.
+            const prioritized =
+              (detail.state.prioritized as ClassifiedEmail[] | undefined) ?? [];
+            const cursor = (detail.state.cursor as number | undefined) ?? 0;
+            const remaining = Math.max(0, prioritized.length - cursor - 1);
+
+            setPending({ draft: pendingDraft, remaining });
+            dispatchPipeline({
+              type: 'restore',
+              classified,
+              doneEmailIds: doneIds,
+              pausedAtReview: {
+                emailId: pendingDraft.email_id,
+                iteration: cursor,
+                total: prioritized.length,
+              },
+            });
+            // Make the "you're back at a paused review" intent obvious —
+            // the user just refreshed and the timeline alone wouldn't
+            // make it clear that the DraftReviewCard at the bottom is
+            // the same one they were looking at before. ``silent: true``
+            // (mount-time auto-restore) skips this so a freshly opened
+            // tab doesn't shout at the user.
+            if (!opts?.silent) {
+              addMessage({
+                kind: 'system',
+                text: '↩ 已恢复到上次中断的审批位置 — 继续处理这封邮件',
+              });
+            }
+            // Mirror to the sync ref so handleFrame's duplicate detector
+            // works correctly when the resumed stream emits decisions.
+            // (We add doneIds + nothing else; the currently-paused email
+            // is intentionally NOT in the done set yet.)
+          } else {
+            dispatchPipeline({
+              type: 'restore',
+              classified,
+              doneEmailIds: doneIds,
+            });
+          }
+        } else {
+          doneEmailIdsRef.current = new Set();
+          dispatchPipeline({
+            type: 'restore',
+            classified: [],
+            doneEmailIds: new Set(),
+          });
+        }
+        taskRef.current = null;
+        summaryEmittedRef.current = false;
+        checkpointWarningShownRef.current = false;
+      } catch (e) {
+        if (!opts?.silent) {
+          addMessage({
+            kind: 'error',
+            text: `加载会话失败: ${(e as Error).message}`,
+          });
+        }
+      } finally {
+        setRestoring(false);
+        setHistoryOpen(false); // dismiss drawer once a row was picked
+      }
+    },
+    [running, addMessage],
+  );
+
+  // Mount: pick / generate the session id, persist to URL + localStorage,
+  // and try to restore prior state (if any). Runs ONCE — the empty deps
+  // array is intentional, the refs / setters captured here are stable.
+  // ``initialized`` flips to true regardless of success/failure so the UI
+  // unblocks even if the network is dead.
+  useEffect(() => {
+    const id = getOrCreateSessionId();
+    conversationIdRef.current = id;
+    persistSessionId(id);
+    void restoreSession(id, { silent: true }).finally(() => {
+      setInitialized(true);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const processSingleEmail = useCallback(
+    (emailId: string) => {
+      // single_reply re-uses cached classified; user can still hit "force
+      // refresh" beforehand if they want fresh mail. We don't auto-force
+      // here because the user just clicked one specific email — they
+      // already trust the snapshot.
+      void startRun('single_reply', { targetEmailId: emailId });
+    },
+    [startRun],
+  );
+
+  const submitDecision = useCallback(
+    async (decision: ReviewDecisionInput) => {
+      const cid = conversationIdRef.current;
+      if (!cid || !pending) return;
+      // Echo the decision into the timeline immediately
+      addMessage({ kind: 'decision', text: decisionLabel(decision) });
+      // 'regenerate' keeps the same email active — don't add it to doneEmailIds.
+      // Other actions (approve / edit / reject / skip) finalize this email.
+      if (decision.action === 'regenerate') {
+        dispatchPipeline({ type: 'regenerate', emailId: pending.draft.email_id });
+      } else {
+        dispatchPipeline({ type: 'decision', emailId: pending.draft.email_id });
+        // Mirror into the synchronous ref so handleFrame can check duplicates
+        // before React has committed the reducer state.
+        doneEmailIdsRef.current = new Set([
+          ...doneEmailIdsRef.current,
+          pending.draft.email_id,
+        ]);
+      }
+      setPending(null);
+      setRunning(true);
+
+      try {
+        for await (const frame of submitReview({ conversationId: cid, decision })) {
+          handleFrame(frame);
+        }
+      } catch (e) {
+        addMessage({ kind: 'error', text: (e as Error).message });
+      } finally {
+        setRunning(false);
+      }
+    },
+    [addMessage, handleFrame, pending],
+  );
+
+  const nodeStatusesForViz = useMemo(
+    () => deriveActiveNode(pipeline.nodeStatuses, running, !!pending),
+    [pipeline.nodeStatuses, running, pending],
+  );
+
+  // Display counter — per-run, NOT cumulative across runs. While a draft is
+  // pending the user's decision, count it as "in progress" (n+1 / total) so
+  // the chip says "运行中 · 2 / 5" while the user is on email #2 of 5, then
+  // ticks to 3 / 5 after they decide. runIteration comes from the apply
+  // node's cursor (authoritative); we add (pending ? 1 : 0) for in-flight.
+  const displayIteration = pipeline.runIteration + (pending ? 1 : 0);
+  const displayTotal = pipeline.runTotal;
+  const showCounter = displayTotal > 0 && pipeline.currentTask !== 'single_reply';
+
+  return (
+    <ChatLayout
+      header={
+        <div style={headerInner}>
+          <div style={brandWrap}>
+            <div style={brandMark} aria-hidden>
+              <Icon name="mail" size={18} strokeWidth={2} />
+            </div>
+            <div>
+              <h1 style={appTitle}>AI 邮件管家</h1>
+              <span style={appSubtitle}>
+                LangGraph · CrewAI · Human-in-the-loop
+              </span>
+            </div>
+          </div>
+          <RuntimeStatusChip
+            running={running}
+            paused={!!pending}
+            messagesCount={messages.length}
+            iteration={displayIteration}
+            total={displayTotal}
+            showCounter={showCounter}
+          />
+        </div>
+      }
+      toolbar={
+        <div style={toolbarInner}>
+          <div style={toolbarGroup}>
+            <button
+              onClick={() => startRun('triage_only')}
+              disabled={running || restoring || !initialized}
+              style={primaryBtn}
+              title="只跑 fetch → classify → prioritize → summarize,不起草"
+            >
+              <Icon name="sparkles" size={14} />
+              <span>仅分类</span>
+            </button>
+            <button
+              onClick={() => startRun('daily_digest')}
+              disabled={running || restoring || !initialized}
+              style={primaryBtnFilled}
+              title="完整流程 — 起草、逐封审批、保存到草稿,最后顺手生成日报。复用上次分类结果"
+            >
+              <Icon name="send" size={14} />
+              <span>处理待回邮件</span>
+            </button>
+            {running && (
+              <button
+                type="button"
+                onClick={stopCurrentRun}
+                style={stopBtn}
+                title="发送停止信号 — 后端会在下一个节点边界优雅退出"
+              >
+                <Icon name="x" size={13} strokeWidth={2.5} />
+                <span>停止</span>
+              </button>
+            )}
+          </div>
+          {pipeline.scoresLocked && pipeline.classified.length > 0 && (
+            <>
+              <span style={toolbarDivider} aria-hidden />
+              <button
+                onClick={() =>
+                  startRun(taskRef.current ?? 'triage_only', { forceRefresh: true })
+                }
+                disabled={running || restoring || !initialized}
+                style={ghostBtn}
+                title="重新从邮箱拉取最新邮件并分类(放弃缓存)"
+              >
+                <Icon name="refresh-cw" size={13} />
+                <span>强制刷新</span>
+              </button>
+            </>
+          )}
+          {/* New session + history toggle pinned to the right end of the
+              toolbar so they sit next to the drawer that slides in from
+              the right. ``marginLeft: auto`` on the first one pushes the
+              whole pair past the action buttons. */}
+          <button
+            type="button"
+            onClick={startNewSession}
+            disabled={running || restoring || !initialized}
+            style={{ ...newSessionBtn, marginLeft: 'auto' }}
+            title="开始一个新的对话(原会话保留在历史里)"
+          >
+            <Icon name="sparkles" size={13} />
+            <span>新会话</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setHistoryOpen((v) => !v)}
+            style={historyToggleBtn}
+            aria-pressed={historyOpen}
+            title="展开/收起历史会话面板"
+          >
+            <Icon name="archive" size={13} />
+            <span>历史</span>
+          </button>
+        </div>
+      }
+      history={
+        <HistorySidebar
+          activeId={conversationIdRef.current}
+          onSelect={(id) => void restoreSession(id)}
+          refreshKey={historyRefreshKey}
+          busy={running || restoring}
+        />
+      }
+      historyOpen={historyOpen}
+      onCloseHistory={() => setHistoryOpen(false)}
+      left={
+        <EmailInboxTree
+          emails={pipeline.classified}
+          activeEmailId={pipeline.activeEmailId}
+          doneEmailIds={pipeline.doneEmailIds}
+          // Banner only while we're ACTUALLY mid-fetch (i.e. fetch hasn't
+          // completed yet). Tying it to fetch's status — instead of the
+          // older "running && !scoresLocked" heuristic — means the banner
+          // doesn't linger throughout draft / review / apply / summarize.
+          // Cache hits flip fetch:done immediately, so the banner barely
+          // flashes for them. ✓
+          refreshing={
+            running &&
+            pipeline.nodeStatuses.fetch !== 'done' &&
+            pipeline.classified.length > 0
+          }
+          fetchedCount={pipeline.fetchedCount}
+          classifying={
+            // We've fetched but classify hasn't finished — show
+            // "已拉取 N 封,正在分类..." in the empty state instead of
+            // the placeholder onboarding text.
+            pipeline.nodeStatuses.fetch === 'done' &&
+            pipeline.nodeStatuses.classify !== 'done' &&
+            pipeline.fetchedCount > 0
+          }
+          onProcessSingle={processSingleEmail}
+          actionsDisabled={running}
+        />
+      }
+      center={
+        initialized ? (
+          <ConversationStream
+            messages={messages}
+            pendingDraft={pending}
+            onSubmitDecision={submitDecision}
+            decisionDisabled={running}
+            progress={progress}
+            streamingText={streamingText}
+          />
+        ) : (
+          // Mount-time loading. Without this gate the user briefly sees the
+          // OnboardingPanel and then it abruptly swaps to the restored
+          // timeline once /email/history GET resolves (~200ms typically).
+          // A spinner-and-text card makes the transition feel intentional.
+          <main style={loadingShell}>
+            <div style={loadingCard}>
+              <IconSpinner size={18} />
+              <span>正在加载会话...</span>
+            </div>
+          </main>
+        )
+      }
+      right={
+        <NodeFlowVisualizer
+          statuses={nodeStatusesForViz}
+          cachedNodes={pipeline.cachedNodes}
+          iteration={displayIteration}
+          totalEmails={displayTotal}
+          showCounter={showCounter}
+          progress={progress}
+        />
+      }
+    />
+  );
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function decisionLabel(d: ReviewDecisionInput): string {
+  switch (d.action) {
+    case 'approve':
+      return '✓ 通过';
+    case 'edit':
+      return d.edited_body ? '✏️ 用我改的版本' : '✓ 通过(编辑)';
+    case 'reject':
+      return '✗ 不回复';
+    case 'regenerate':
+      return d.feedback ? `↻ 重写:${d.feedback}` : '↻ 重写';
+    case 'skip':
+      return '↦ 跳过';
+  }
+}
+
+/** Bring the active node forward — whichever pipeline step is "next" but not yet done. */
+function deriveActiveNode(
+  done: Partial<Record<PipelineNode, NodeStatus>>,
+  running: boolean,
+  isPaused: boolean,
+): Partial<Record<PipelineNode, NodeStatus>> {
+  const PIPELINE_ORDER: PipelineNode[] = [
+    'fetch',
+    'classify',
+    'prioritize',
+    'draft',
+    'review',
+    'apply',
+    'summarize',
+  ];
+  const next: Partial<Record<PipelineNode, NodeStatus>> = { ...done };
+  if (isPaused) {
+    next.review = 'paused';
+    return next;
+  }
+  if (!running) return next;
+  // Find first pipeline node whose status is NOT done — that's where we are now
+  for (const n of PIPELINE_ORDER) {
+    if (next[n] !== 'done') {
+      next[n] = 'active';
+      break;
+    }
+  }
+  return next;
+}
+
+// ─── styles ─────────────────────────────────────────────────────────────────
+
+const headerInner: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: tokens.space[3],
+};
+
+const brandWrap: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: tokens.space[3],
+};
+
+const brandMark: React.CSSProperties = {
+  width: 36,
+  height: 36,
+  borderRadius: tokens.radius.lg,
+  background: tokens.color.gradientBrandStrong,
+  color: tokens.color.textInverted,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  boxShadow: tokens.shadow.focus,
+  flexShrink: 0,
+};
+
+const appTitle: React.CSSProperties = {
+  margin: 0,
+  fontSize: tokens.fontSize.xl,
+  fontWeight: tokens.fontWeight.semibold,
+  color: tokens.color.text,
+  letterSpacing: '-0.01em',
+  lineHeight: 1.2,
+};
+
+const appSubtitle: React.CSSProperties = {
+  fontSize: tokens.fontSize.xs,
+  color: tokens.color.textSubtle,
+  fontFamily: tokens.font.mono,
+  letterSpacing: '0.02em',
+};
+
+const toolbarInner: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: tokens.space[3],
+  flexWrap: 'wrap',
+};
+
+const toolbarGroup: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: tokens.space[2],
+};
+
+const toolbarDivider: React.CSSProperties = {
+  width: 1,
+  height: 18,
+  background: tokens.color.border,
+  display: 'inline-block',
+};
+
+const primaryBtn: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: tokens.space[2],
+  background: tokens.color.bg,
+  color: tokens.color.brand,
+  border: `1px solid ${tokens.color.brandBorder}`,
+  padding: `7px ${tokens.space[3]}px`,
+  borderRadius: tokens.radius.md,
+  fontSize: tokens.fontSize.base,
+  fontWeight: tokens.fontWeight.medium,
+  lineHeight: 1.2,
+  cursor: 'pointer',
+};
+
+const primaryBtnFilled: React.CSSProperties = {
+  ...primaryBtn,
+  background: tokens.color.gradientBrandStrong,
+  color: tokens.color.textInverted,
+  border: `1px solid transparent`,
+  boxShadow: tokens.shadow.focus,
+};
+
+const ghostBtn: React.CSSProperties = {
+  ...primaryBtn,
+  // Subtler than primary — emphasizes this is a secondary "I want to override
+  // the default cache-reuse behavior" action, not a main task launcher.
+  background: 'transparent',
+  color: tokens.color.textSubtle,
+  border: `1px dashed ${tokens.color.border}`,
+};
+
+/** "停止" button — danger-toned because it's destructive (kills an in-flight
+ * run). Sits inline with the primary actions so it's discoverable: the
+ * button people need to find the moment they realize a run is going wrong. */
+const stopBtn: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: tokens.space[2],
+  padding: `7px ${tokens.space[3]}px`,
+  borderRadius: tokens.radius.md,
+  fontSize: tokens.fontSize.base,
+  fontWeight: tokens.fontWeight.medium,
+  lineHeight: 1.2,
+  cursor: 'pointer',
+  color: tokens.color.danger,
+  background: tokens.color.dangerSoft,
+  border: `1px solid #fecaca`,
+};
+
+/** Toolbar's "历史" toggle — opens the slide-out drawer. Subtle styling
+ * (ghost variant) so it doesn't compete with the primary task buttons. */
+const historyToggleBtn: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+  padding: '7px 12px',
+  borderRadius: tokens.radius.md,
+  fontSize: tokens.fontSize.sm,
+  fontFamily: tokens.font.sans,
+  fontWeight: tokens.fontWeight.medium,
+  color: tokens.color.textMuted,
+  background: 'transparent',
+  border: `1px solid ${tokens.color.border}`,
+  cursor: 'pointer',
+  lineHeight: 1.2,
+};
+
+/** "新会话" — slightly stronger than 历史 (brand-tinted text + dotted brand
+ * border) so it reads as a deliberate action, not a meta-navigation toggle.
+ * Sits to the LEFT of 历史 so the pair reads "start fresh / look back". */
+const newSessionBtn: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+  padding: '7px 12px',
+  borderRadius: tokens.radius.md,
+  fontSize: tokens.fontSize.sm,
+  fontFamily: tokens.font.sans,
+  fontWeight: tokens.fontWeight.medium,
+  color: tokens.color.brand,
+  background: tokens.color.brandSoft,
+  border: `1px solid ${tokens.color.brandBorder}`,
+  cursor: 'pointer',
+  lineHeight: 1.2,
+};
+
+// ─── Mount-time loading center ──────────────────────────────────────────────
+
+const loadingShell: React.CSSProperties = {
+  flex: 1,
+  minHeight: 0,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  background: tokens.color.bg,
+};
+
+const loadingCard: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: tokens.space[2],
+  padding: `${tokens.space[3]}px ${tokens.space[4]}px`,
+  borderRadius: tokens.radius.lg,
+  background: tokens.color.surface,
+  border: `1px solid ${tokens.color.border}`,
+  color: tokens.color.textMuted,
+  fontSize: tokens.fontSize.sm,
+  fontFamily: tokens.font.mono,
+};
+
+// ─── RuntimeStatusChip ──────────────────────────────────────────────────────
+
+interface StatusChipProps {
+  running: boolean;
+  paused: boolean;
+  messagesCount: number;
+  iteration: number;
+  total: number;
+  /** Whether to show the "X / Y" suffix. False for ``triage_only`` (no
+   * iterations) and ``single_reply`` (always 1 / 1 — counter is noise). */
+  showCounter: boolean;
+}
+
+function RuntimeStatusChip({
+  running,
+  paused,
+  messagesCount,
+  iteration,
+  total,
+  showCounter,
+}: StatusChipProps) {
+  // Idle: hide entirely so the header stays clean before the user clicks anything.
+  if (!running && messagesCount === 0) return null;
+
+  let tone: 'brand' | 'warning' | 'success' = 'success';
+  let icon: JSX.Element;
+  let label: string;
+
+  if (paused) {
+    tone = 'warning';
+    icon = <Icon name="pause" size={12} />;
+    label = showCounter ? `等待审批 · ${iteration} / ${total}` : '等待审批';
+  } else if (running) {
+    tone = 'brand';
+    icon = <IconSpinner size={12} />;
+    label = showCounter ? `运行中 · ${iteration} / ${total}` : '运行中';
+  } else {
+    tone = 'success';
+    icon = <Icon name="check-circle" size={12} />;
+    label = showCounter ? `已完成 · ${iteration} / ${total}` : '已完成';
+  }
+
+  const palette = {
+    brand: { bg: tokens.color.brandSoft, fg: tokens.color.brand, bd: tokens.color.brandBorder },
+    warning: { bg: tokens.color.warningSoft, fg: tokens.color.warning, bd: '#fde68a' },
+    success: { bg: tokens.color.successSoft, fg: tokens.color.success, bd: '#bbf7d0' },
+  }[tone];
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: tokens.space[2],
+        padding: `4px ${tokens.space[3]}px`,
+        borderRadius: tokens.radius.pill,
+        background: palette.bg,
+        color: palette.fg,
+        border: `1px solid ${palette.bd}`,
+        fontSize: tokens.fontSize.xs,
+        fontFamily: tokens.font.mono,
+        fontWeight: tokens.fontWeight.medium,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {icon}
+      <span>{label}</span>
+    </div>
+  );
+}
