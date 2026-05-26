@@ -128,12 +128,24 @@ def build_draft_task(
         f"  - Reply in {language} (override the original email's language "
         "if the user feedback below requests a specific language)\n"
         "  - Do NOT add a sign-off / signature — the polisher handles that\n"
+        "  - This is an EMAIL BODY — write PLAIN TEXT prose only.\n"
+        "    ❌ NO markdown formatting of any kind:\n"
+        "       no `**bold**`, no `## headings`, no backtick code,\n"
+        "       no `- ` bullet markers, no `[text](url)` links,\n"
+        "       no tables, no horizontal rules.\n"
+        "    ✅ Use natural paragraphs separated by blank lines.\n"
+        "       For lists, write them as numbered prose (\"First, ...\\n\\n"
+        "       Second, ...\") or as colon-separated short lines without\n"
+        "       leading dashes.\n"
         f"{feedback_block}"
     )
     return Task(
         name="draft_task",
         description=description,
-        expected_output="Plain markdown body text. No sign-off, no JSON.",
+        expected_output=(
+            "Plain-text email body. No markdown syntax (no **, ##, `, -, "
+            "[](), tables). No sign-off, no JSON."
+        ),
         agent=writer_agent,
         context=[analyze],
     )
@@ -167,20 +179,26 @@ def build_polish_task(
         f"tone (or '{default_tone}' if 'none').\n"
         "  2. Adjust phrasing to match the tone — keep the SAME content; "
         "only change HOW it's said.\n"
-        f"  3. Append the user's signature on its own line: '{signature}'\n"
-        "  4. Output ONLY a JSON object with these EXACT field values "
+        "  3. Strip ALL markdown syntax from the body if the writer left any "
+        "behind. The body is plain text only — convert `**bold**` to plain "
+        "emphasis-by-word-choice, convert `- bullets` to natural prose or "
+        "newline-separated short lines, drop any `## headings`, backtick "
+        "code, `[text](url)` links, tables, or horizontal rules.\n"
+        f"  4. Append the user's signature on its own line: '{signature}'\n"
+        "  5. Output ONLY a JSON object with these EXACT field values "
         "(copy the email_id / to / subject as-is):\n"
         "{\n"
         f'  "email_id": "{email_id}",\n'
         f'  "to": ["{email_sender}"],\n'
         f'  "subject": "{fallback_subject}",\n'
-        '  "body": "<polished body + signature>",\n'
+        '  "body": "<plain-text polished body + signature, no markdown>",\n'
         '  "tone": "<the tone you applied>",\n'
         '  "template_used": "<template name or null>",\n'
         '  "confidence": <0.0 to 1.0>,\n'
         '  "rationale": "<one sentence why this reply works>"\n'
         "}\n\n"
-        "Output ONLY the JSON. No markdown fences. No prose."
+        "Output ONLY the JSON. No markdown fences. No prose. The body field "
+        "MUST be plain text (use \\n for paragraph breaks)."
     )
     return Task(
         name="polish_task",

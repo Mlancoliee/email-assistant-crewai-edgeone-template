@@ -553,6 +553,99 @@ async def draft_with_crew(state: EmailAssistantState, *, llm) -> dict:
     return {"drafts": [draft], "pending_review": draft}
 
 
+def _strip_email_markdown(body: str) -> str:
+    """Defensively strip markdown syntax from an email body.
+
+    The polisher prompt forbids markdown, but LLMs sometimes ignore the
+    instruction (especially when adapting a markdown-y reply template).
+    This pass acts as a safety net so the textarea in DraftReviewCard
+    never shows raw `**bold**` or `## headings` to the user.
+
+    Conservative — we only strip well-known markdown markers; we don't try
+    to "render" them. The goal is plain text the user can paste verbatim
+    into Gmail's compose box.
+
+    Order matters:
+      1. Code fences (```...```) — replace with the raw inner text
+      2. Inline backticks (`code`) — drop the backticks, keep the word
+      3. Bold / italic (**text**, *text*, __text__, _text_) — keep the text
+      4. Heading markers (##, ###) at line start — drop just the marker
+      5. Bullet markers (- / *) at line start — replace with nothing (the
+         indent + content remains, reading as a normal short paragraph)
+      6. Numbered list markers (``1. `` at line start) are KEPT — they
+         look natural in plain-text emails ("1. First, do X.")
+      7. Link syntax [text](url) → "text (url)"
+      8. Horizontal rules (---, ***, ___) on their own line → drop
+      9. Markdown tables — drop entirely (the | row syntax is unreadable
+         as plain text and would corrupt the email)
+    """
+    import re
+
+    if not body:
+        return body
+    text = body
+
+    # 1. Code fences — keep inner content, drop the fence markers + lang hint
+    text = re.sub(r"```[^\n]*\n?(.*?)```", r"\1", text, flags=re.DOTALL)
+
+    # 2. Inline backticks
+    text = re.sub(r"`([^`\n]+)`", r"\1", text)
+
+    # 3. Bold / italic. Strip stars/underscores around runs of non-marker chars.
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", text)
+    text = re.sub(r"__([^_\n]+)__", r"\1", text)
+    text = re.sub(r"\*([^*\n]+)\*", r"\1", text)
+    text = re.sub(r"(?<!\w)_([^_\n]+)_(?!\w)", r"\1", text)
+
+    # 7. Link syntax. Do this BEFORE stripping bullet markers — order of
+    # operations doesn't matter for these but it's easier to reason about.
+    text = re.sub(r"\[([^\]\n]+)\]\(([^)\n]+)\)", r"\1 (\2)", text)
+
+    # Now line-by-line for headings / bullets / hr / tables.
+    out_lines: list[str] = []
+    in_table = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+
+        # 9. Markdown table detection — a line that is mostly pipe-separated
+        # cells. We drop the whole table; subsequent paragraph break already
+        # handles spacing.
+        is_table_row = stripped.startswith("|") and stripped.count("|") >= 2
+        is_table_sep = bool(re.match(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$", stripped))
+        if is_table_row or is_table_sep:
+            in_table = True
+            continue
+        if in_table and stripped == "":
+            in_table = False
+            out_lines.append("")
+            continue
+        in_table = False
+
+        # 8. Horizontal rule
+        if re.match(r"^\s*([-*_])\1{2,}\s*$", line):
+            continue
+
+        # 4. Heading markers
+        m = re.match(r"^\s*#{1,6}\s+(.*)$", line)
+        if m:
+            out_lines.append(m.group(1))
+            continue
+
+        # 5. Bullet markers (-, *, +) — drop the marker, keep indent + text
+        m = re.match(r"^(\s*)[-*+]\s+(.*)$", line)
+        if m:
+            out_lines.append(f"{m.group(1)}{m.group(2)}")
+            continue
+
+        out_lines.append(line)
+
+    # Collapse 3+ blank lines to 2 (markdown-stripping can leave gaps where
+    # tables / hrules used to be).
+    cleaned = "\n".join(out_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def _normalize_draft(draft: DraftItem, ce: ClassifiedEmail) -> DraftItem:
     """Apply post-LLM safety nets so the UI never shows broken drafts.
 
@@ -591,6 +684,15 @@ def _normalize_draft(draft: DraftItem, ce: ClassifiedEmail) -> DraftItem:
             "(草稿生成失败 — LLM 没拿到有效的邮件上下文。请点 ↻ 重写,或检查 "
             "_tasks.py / _crew.py 的 inputs 传递是否完整。)"
         )
+    else:
+        # Strip residual markdown — emails are plain text. Prompts are
+        # advisory; this pass is the enforcement. Always run, even if the
+        # body looks clean, because the cost is negligible (regex on a
+        # few-hundred-character string) and a single missed `**` would
+        # ruin the user's first impression of the draft.
+        cleaned_body = _strip_email_markdown(body_text)
+        if cleaned_body and cleaned_body != body_text:
+            patched["body"] = cleaned_body
 
     # email_id: should always match the source email's id
     if not draft.email_id or "{" in (draft.email_id or ""):
@@ -820,23 +922,93 @@ async def apply(state: EmailAssistantState, *, provider) -> dict:
 # ─── summarize (final markdown digest) ───────────────────────────────────────
 
 
-SUMMARIZE_SYSTEM = """你是一个邮件助手的总结员。生成一份简洁的中文 markdown 摘要(≤800 字符),
+SUMMARIZE_SYSTEM = """你是一个邮件助手的总结员。生成一份简洁的中文摘要(≤800 字符),
 让用户一眼看清这次跑完的成果。
 
-结构(每节都用 markdown 二级标题):
+结构(用 markdown 二级标题分节,内容用纯文本或无序列表):
 
-1. ## 概览 —— 邮件总数 / 已分类 / 已起草 / 决策数
-2. ## 需要关注的 —— 列出前 5 封 priority 高的邮件,每封一行格式:
+1. ## 概览 —— 用一两句自然语言写清楚:邮件总数 / 已分类 / 已起草 / 决策数
+2. ## 需要关注的 —— 列出前 5 封 priority 高的邮件,每封一行无序列表项,格式:
    `- [优先级] 主题 — 发件人 — 一句理由`
-3. ## 本次决定 —— 表格或列表展示每封的 action(approve/edit/reject/skip)
+3. ## 本次决定 —— 用无序列表展示每封的 action(approve/edit/reject/skip),
+   每行格式:`- 主题(发件人):approve/edit/reject/skip — 一句简评`
 4. ## 下一步建议 —— 1-3 条自然语言提示
 
-要求:
+严格要求:
+- ❌ 禁止使用 markdown 表格(任何形如 `| 列1 | 列2 |` 的语法都不行 —— 前端不支持渲染)
+- ❌ 禁止使用 markdown 代码块 / 围栏(```...```)
+- ❌ 禁止使用 HTML 标签
+- ✅ 只允许:## 标题、`- ` 无序列表、**加粗**、普通段落
 - 简洁,商务感
 - 不要重复每封邮件的全文
-- 不要添加任何 markdown 围栏
 - 直接输出 markdown 内容,无前后语
 """
+
+
+def _sanitize_summary_md(text: str) -> str:
+    """Strip markdown the frontend's MarkdownBody can't render.
+
+    The frontend hand-rolls a tiny markdown subset (see
+    ``ConversationStream.tsx::MarkdownBody``): h2/h3, bullet lists,
+    **bold**, inline `code`, links. Anything else renders as raw text and
+    looks broken — we sanitize those constructs server-side so the user
+    sees a clean digest even when the LLM ignores prompt rules.
+
+    Specifically:
+      - Markdown tables (`| col | col |` rows + the `|---|---|` separator)
+        → drop entirely. The summary structure already calls for lists
+        not tables, but LLMs default to tables for "decisions per email".
+      - Fenced code blocks (```...```) → keep the inner content as
+        plain paragraph text (drop the fence + lang hint).
+      - Numbered lists (`1. foo`) → convert to bullet lists (`- foo`)
+        because MarkdownBody only renders `- ` / `* `.
+
+    Headings, bold, inline backticks, links, and bullet lists are left
+    untouched — they render correctly.
+    """
+    import re
+
+    if not text:
+        return text
+
+    # Drop fenced code blocks but preserve their inner content (so the user
+    # still sees what was inside if it was meaningful).
+    text = re.sub(r"```[^\n]*\n?(.*?)```", r"\1", text, flags=re.DOTALL)
+
+    # Walk line-by-line for table detection + numbered-list conversion.
+    out_lines: list[str] = []
+    in_table = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+
+        # Markdown table row OR separator
+        is_table_row = stripped.startswith("|") and stripped.count("|") >= 2
+        is_table_sep = bool(
+            re.match(
+                r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$", stripped
+            )
+        )
+        if is_table_row or is_table_sep:
+            in_table = True
+            continue
+        if in_table and stripped == "":
+            in_table = False
+            out_lines.append("")
+            continue
+        in_table = False
+
+        # Numbered list → bullet list (MarkdownBody only supports `- `/`* `)
+        m = re.match(r"^(\s*)\d+\.\s+(.*)$", line)
+        if m:
+            out_lines.append(f"{m.group(1)}- {m.group(2)}")
+            continue
+
+        out_lines.append(line)
+
+    cleaned = "\n".join(out_lines)
+    # Collapse runs of 3+ blank lines created by table removal.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 async def summarize(
@@ -928,6 +1100,13 @@ async def summarize(
             "message": "⚠ LLM 返回空摘要,使用降级模板",
         })
         return {"summary": fallback, "errors": ["summarize: LLM returned empty"]}
+    # Sanitize markdown the frontend can't render (tables, code fences,
+    # numbered lists). The streamed token bubble may have briefly shown
+    # raw `| col |` rows during streaming, but the final settled summary
+    # message uses ``state.summary`` (this return value), so the rendered
+    # bubble lands clean. The cost is a single regex pass on a ~800-char
+    # string — negligible.
+    text = _sanitize_summary_md(text)
     write({
         "phase": "summarize",
         "stage": "completed",

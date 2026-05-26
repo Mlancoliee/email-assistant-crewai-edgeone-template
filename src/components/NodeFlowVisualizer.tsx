@@ -17,17 +17,15 @@ interface Props {
    * as a grey "缓存" chip with a lightning bolt instead of the usual ✓ done
    * green tick, so the user can tell at a glance that no real work happened. */
   cachedNodes?: ReadonlySet<PipelineNode>;
-  /** Number of completed draft→review→apply iterations (1-indexed); 0 if not started. */
-  iteration?: number;
-  /** Total emails in the queue, for showing "draft 2/6" style progress. */
-  totalEmails?: number;
-  /** Whether to render the "X / Y" iteration pill on draft/review/apply
-   * nodes. Owner decides — single_reply / triage_only suppress it. */
-  showCounter?: boolean;
   /** Latest narration from a node's ``get_stream_writer`` call. When the
    * payload's ``phase`` matches a node id, that node renders a sub-line
    * with the message — gives users an inline "what's actually happening
-   * inside this stage" without leaving the pipeline column. */
+   * inside this stage" without leaving the pipeline column.
+   *
+   * Note: per-iteration counters (``iteration`` / ``totalEmails``) are
+   * intentionally NOT a prop here — they live in the header chip
+   * (``RuntimeStatusChip``) only. Showing them in both places duplicated
+   * information and made the pipeline column feel cluttered. */
   progress?: ProgressPayload | null;
 }
 
@@ -54,9 +52,6 @@ const NODE_DESCRIPTION: Record<PipelineNode, string> = {
 export default function NodeFlowVisualizer({
   statuses,
   cachedNodes,
-  iteration,
-  totalEmails,
-  showCounter,
   progress,
 }: Props) {
   return (
@@ -70,15 +65,6 @@ export default function NodeFlowVisualizer({
           const status = statuses[node] || 'pending';
           const isLast = idx === PIPELINE_NODES.length - 1;
           const isCached = cachedNodes?.has(node) ?? false;
-          // Boolean(...) is REQUIRED — without it, the && short-circuit can
-          // evaluate to literal 0 / undefined which JSX would render as text.
-          // (That's why "起草 0 / 审批 0 / 应用 0" was leaking onto the screen.)
-          const showIteration = Boolean(
-            (node === 'draft' || node === 'review' || node === 'apply') &&
-              showCounter &&
-              iteration !== undefined && iteration >= 0 &&
-              totalEmails && totalEmails > 0,
-          );
           // Inline narration from the latest ``progress`` event tied to
           // THIS node — only rendered while the node is active so a stale
           // "✅ 分类完成" message doesn't linger on a node we've already
@@ -96,14 +82,13 @@ export default function NodeFlowVisualizer({
                   <span style={{ ...labelText, color: status === 'active' ? tokens.color.brand : tokens.color.text }}>
                     {NODE_LABEL[node]}
                   </span>
-                  {showIteration ? (
-                    <span style={iterPill}>
-                      {iteration} / {totalEmails}
-                    </span>
-                  ) : null}
                   {/* Cached chip outranks the normal status pill — when both
                       apply (a cached node MUST be ``done``), the cached chip
-                      is the more useful signal. */}
+                      is the more useful signal. The per-iteration "X / Y"
+                      counter intentionally lives ONLY in the header chip
+                      (RuntimeStatusChip in App.tsx) — duplicating it here was
+                      noise: the pipeline is per-node status, not per-email
+                      progress. */}
                   {isCached && status === 'done' ? (
                     <CachedPill />
                   ) : (
@@ -385,17 +370,6 @@ const descText: React.CSSProperties = {
   marginTop: 2,
   marginLeft: 18,
   lineHeight: 1.5,
-};
-
-const iterPill: React.CSSProperties = {
-  fontFamily: tokens.font.mono,
-  fontSize: tokens.fontSize.xs,
-  color: tokens.color.brand,
-  padding: '1px 8px',
-  borderRadius: tokens.radius.pill,
-  background: tokens.color.brandSoft,
-  border: `1px solid ${tokens.color.brandBorder}`,
-  fontWeight: tokens.fontWeight.semibold,
 };
 
 // ─── narration sub-line under the active node ────────────────────────────

@@ -216,8 +216,39 @@ function pipelineReducer(state: PipelineState, action: PipelineAction): Pipeline
       // run. Otherwise the left column would shrink to just the one email.
       const isSingle = state.currentTask === 'single_reply';
       for (const [nodeName, patch] of Object.entries(action.payload)) {
-        // Mark this node done…
-        next.nodeStatuses[nodeName as PipelineNode] = 'done';
+        // ─── Regenerate pass-through suppression ───────────────────────
+        //
+        // During a regenerate flow the event sequence is:
+        //   review state_update → (routing) → draft state_update → interrupt
+        //
+        // The ``regenerate`` reducer action already set draft='active' and
+        // review='pending'. If we naively mark review='done' on its
+        // state_update, the user sees "draft active + review done" for the
+        // entire 20-30s CrewAI draft generation. Suppress the 'done' mark
+        // for review when we know we're mid-regenerate (signaled by
+        // state.nodeStatuses.draft === 'active' — ONLY the regenerate
+        // action puts draft in this state while review is happening).
+        const suppressDone =
+          nodeName === 'review' &&
+          state.nodeStatuses.draft === 'active';
+
+        if (!suppressDone) {
+          // Mark this node done…
+          next.nodeStatuses[nodeName as PipelineNode] = 'done';
+        }
+
+        // Per-iteration sync: when ``draft`` runs again (next email or
+        // regenerate), the previous iteration's review/apply/summarize
+        // are still marked ``done`` from before. Wipe them back to
+        // ``pending`` so the user doesn't see a contradictory state like
+        // "draft active + apply done". The subsequent ``paused`` action
+        // (when interrupt fires) and follow-up state_update events will
+        // re-mark them appropriately for the current iteration.
+        if (nodeName === 'draft') {
+          next.nodeStatuses.review = 'pending';
+          next.nodeStatuses.apply = 'pending';
+          next.nodeStatuses.summarize = 'pending';
+        }
         if (!patch || typeof patch !== 'object') continue;
         const p = patch as Record<string, unknown>;
         // Backend short-circuit signal — fetch / classify return ``_cached:
@@ -261,6 +292,26 @@ function pipelineReducer(state: PipelineState, action: PipelineAction): Pipeline
         // cursor (from apply node) → runIteration. Authoritative source.
         if (typeof p.cursor === 'number') {
           next.runIteration = p.cursor;
+          // ─── Loop-back detection ──────────────────────────────────────
+          //
+          // The pipeline is a LOOP: draft→review→apply→(draft or summarize).
+          // After ``apply`` advances the cursor, if more emails remain the
+          // graph loops back to ``draft`` for the next email. Without this
+          // block, ALL nodes through apply are 'done' and
+          // ``deriveActiveNode`` would highlight ``summarize`` as active —
+          // confusing the user for the 20-30s until draft's next
+          // state_update arrives.
+          //
+          // Fix: if cursor < runTotal (more emails to process), reset
+          // draft/review to 'pending' so the linear scan in
+          // deriveActiveNode correctly finds ``draft`` as the next active
+          // node. If cursor >= runTotal, the graph IS going to summarize
+          // so we leave things alone (deriveActiveNode will correctly mark
+          // summarize active).
+          if (next.runTotal > 0 && p.cursor < next.runTotal) {
+            next.nodeStatuses.draft = 'pending';
+            next.nodeStatuses.review = 'pending';
+          }
         }
       }
       return next;
@@ -292,18 +343,35 @@ function pipelineReducer(state: PipelineState, action: PipelineAction): Pipeline
         // counter feel snappy. (regenerate path doesn't bump — see below.)
         runIteration: state.runIteration + 1,
         // After the user submits, the next stream from review.py will
-        // re-emit state_update for review/apply nodes; mark review back to
-        // active so it doesn't look stuck on "paused".
+        // re-emit state_update for review/apply nodes. Mark the immediate
+        // transition: review goes back to 'active' (apply runs first, then
+        // possibly looping back to draft for the next email). We DON'T
+        // touch apply / summarize here — the state_update reducer will set
+        // apply to 'done' when it runs, then the next 'draft' state_update
+        // will reset both apply and summarize back to 'pending' for the
+        // new iteration (see the ``nodeName === 'draft'`` branch above).
         nodeStatuses: { ...state.nodeStatuses, review: 'active' },
       };
     case 'regenerate':
       // Regenerate keeps the SAME email active — backend will produce a new
       // draft for it. Critical: doneEmailIds and runIteration are NOT updated
       // (the email isn't done yet) so the progress counter doesn't jump.
+      //
+      // Pipeline sync: previous iteration may have left review/apply/summarize
+      // looking ``done`` (if this is a repeated regenerate) — wipe them so the
+      // user doesn't see "draft loading + apply ✓" simultaneously while the
+      // new draft is being generated. The fresh state_update events from the
+      // re-running graph will mark them again as the iteration proceeds.
       return {
         ...state,
         activeEmailId: action.emailId,
-        nodeStatuses: { ...state.nodeStatuses, review: 'active', draft: 'active' },
+        nodeStatuses: {
+          ...state.nodeStatuses,
+          draft: 'active',
+          review: 'pending',
+          apply: 'pending',
+          summarize: 'pending',
+        },
       };
     case 'error':
       return {
@@ -1101,9 +1169,6 @@ export default function App() {
         <NodeFlowVisualizer
           statuses={nodeStatusesForViz}
           cachedNodes={pipeline.cachedNodes}
-          iteration={displayIteration}
-          totalEmails={displayTotal}
-          showCounter={showCounter}
           progress={progress}
         />
       }

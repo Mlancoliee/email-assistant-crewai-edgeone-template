@@ -16,6 +16,10 @@ Both share the same env vars:
   - ``AI_GATEWAY_API_KEY``
   - ``AI_GATEWAY_BASE_URL``
 
+The default model and the ``X-Gateway-Quota-Bypass`` header match the
+sibling ``marketing-campaign-planner-crewai`` template so platform-wide
+model strategy stays unified.
+
 Imports are deferred so unit tests that only touch parsing / state don't
 pull in ``crewai`` or ``openai`` (heavy install).
 """
@@ -26,8 +30,13 @@ from typing import Any, Mapping
 
 REQUIRED_ENV = ("AI_GATEWAY_API_KEY", "AI_GATEWAY_BASE_URL")
 
-# Default model used by both the CrewAI sub-pipeline and the LangGraph nodes.
+# Default model — keep aligned with sibling templates so the platform-wide
+# model strategy stays unified.
 DEFAULT_MODEL = "@Pages/deepseek-v4-flash"
+
+GATEWAY_HEADERS: dict[str, str] = {
+    "X-Gateway-Quota-Bypass": "true",
+}
 
 
 # ─── Module-level singletons ────────────────────────────────────────────────
@@ -98,7 +107,7 @@ def get_crewai_llm(
 
     from crewai import LLM  # deferred — keep parsing tests light
 
-    headers: dict[str, str] = {}
+    headers = dict(GATEWAY_HEADERS)
     if extra_headers:
         headers.update(extra_headers)
     _crewai_llm_singleton = LLM(
@@ -138,7 +147,7 @@ def get_openai_client(
 
     from openai import AsyncOpenAI  # deferred
 
-    headers: dict[str, str] = {}
+    headers = dict(GATEWAY_HEADERS)
     if extra_headers:
         headers.update(extra_headers)
     _openai_client_singleton = AsyncOpenAI(
