@@ -2,6 +2,9 @@
 
 A full-stack EdgeOne Makers Agent template powered by LangGraph + CrewAI (Python). Demonstrates multi-agent collaboration, human-in-the-loop (HITL) approval workflows, and real-time SSE streaming with a three-column SaaS UI.
 
+## deploy
+[![Deploy to EdgeOne Makers](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://console.cloud.tencent.com/edgeone/makers/new?template=email-assistant-agent&from=within&fromAgent=1&agentLang=python)
+
 ## Features
 
 - **Multi-Agent Collaboration** — CrewAI three-role pipeline (filter / writer / polisher) generates email drafts

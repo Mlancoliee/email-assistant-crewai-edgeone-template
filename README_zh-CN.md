@@ -2,6 +2,9 @@
 
 基于 LangGraph + CrewAI (Python) 的 EdgeOne Makers Agent 全栈项目模板。演示多 Agent 协作、人机协作 (HITL) 审批流程，以及三栏式 SaaS UI 的实时 SSE 流式交互。
 
+## 部署
+[![使用 EdgeOne Makers 部署](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://console.cloud.tencent.com/edgeone/makers/new?template=email-assistant-agent&from=within&fromAgent=1&agentLang=python)
+
 ## 功能
 
 - **多 Agent 协作** — CrewAI 三角色流水线（过滤 / 撰写 / 润色）生成邮件回复草稿
