@@ -14,6 +14,7 @@
  */
 import { ReactNode, useEffect, useRef, useState } from 'react';
 import { tokens } from '../design-tokens';
+import { useI18n, type TranslationKey } from '../i18n';
 import { Icon, IconName, IconSpinner } from '../icons';
 import { DraftItem, ProgressPayload, ReviewDecisionInput } from '../types';
 import DraftReviewCard from './DraftReviewCard';
@@ -72,6 +73,7 @@ export default function ConversationStream({
   restoring,
   emailProvider,
 }: Props) {
+  const { t } = useI18n();
   const scrollRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
@@ -170,7 +172,7 @@ export default function ConversationStream({
           <div ref={cardRef} style={inlineCard}>
             <div style={whoLabel}>
               <Icon name="mail" size={12} />
-              <span>待审草稿</span>
+              <span>{t('reviewPendingLabel')}</span>
             </div>
             <DraftReviewCard
               draft={pendingDraft.draft}
@@ -299,15 +301,16 @@ function RestoringSkeleton() {
 }
 
 function OnboardingPanel({ emailProvider }: { emailProvider?: string }) {
+  const { t } = useI18n();
   const isLive = emailProvider === 'imap' || emailProvider === 'gmail';
-  const providerLabel = emailProvider === 'imap' ? 'IMAP 邮箱' : emailProvider === 'gmail' ? 'Gmail' : '模拟数据';
+  const providerLabel = emailProvider === 'imap' ? t('providerImap') : emailProvider === 'gmail' ? t('providerGmail') : t('providerMock');
   return (
     <div style={onboardingShell}>
       <div style={onboardingInner}>
         <div style={heroPanel}>
-          <h2 style={heroTitle}>邮件处理助手</h2>
+          <h2 style={heroTitle}>{t('onboardingTitle')}</h2>
           <p style={heroDesc}>
-            AI 帮你分类邮件、起草回复，你来拍板
+            {t('onboardingDesc')}
           </p>
         </div>
 
@@ -318,30 +321,28 @@ function OnboardingPanel({ emailProvider }: { emailProvider?: string }) {
             background: isLive ? tokens.color.successSoft : tokens.color.surface,
             color: isLive ? tokens.color.success : tokens.color.textSubtle,
             border: `1px solid ${isLive ? '#bbf7d0' : tokens.color.border}`,
-            marginLeft: 0,
-            width: '120px',
-            textAlign: 'center',
+            alignSelf: 'flex-start',
           }}>
-            {isLive ? `✓ 已连接 ${providerLabel}` : '⚡ 模拟数据模式'}
+            {isLive ? t('providerLiveBadge', { provider: providerLabel }) : t('providerMockBadge')}
           </span>
           <p style={dataSourceBody}>
             {isLive
-              ? '将从你的真实收件箱拉取邮件。'
-              : '未检测到 IMAP 配置，将使用 10 封模拟邮件。配置环境变量可接入真实邮箱。'}
+              ? t('providerConnected', { provider: providerLabel })
+              : t('providerMockDesc')}
           </p>
         </div>
 
         {/* AI auto-process hint */}
         <div style={aiHintPanel}>
           <Icon name="sparkles" size={13} />
-          <span>不确定要处理哪些？点击工具栏「AI 智能处理」，AI 帮你挑选最该回复的邮件</span>
+          <span>{t('aiHint')}</span>
         </div>
 
         {/* Simple 3-step guide */}
         <ol style={steps}>
-          <Step icon="inbox" title="拉取邮件" body="点击上方「拉取邮件」获取收件箱内容" />
-          <Step icon="edit-3" title="选择处理" body="点击左栏任意邮件的「起草回复」，AI 自动撰写" />
-          <Step icon="check-circle" title="审批确认" body="通过 / 编辑 / 驳回 — 你拥有最终决定权" />
+          <Step icon="inbox" title={t('step1Title')} body={t('step1Body')} />
+          <Step icon="edit-3" title={t('step2Title')} body={t('step2Body')} />
+          <Step icon="check-circle" title={t('step3Title')} body={t('step3Body')} />
         </ol>
       </div>
     </div>
@@ -363,6 +364,7 @@ function Step({ icon, title, body }: { icon: IconName; title: string; body: stri
 }
 
 function MessageRow({ m }: { m: StreamMessage }) {
+  const { t: mt } = useI18n();
   const isUser = m.kind === 'decision';
   return (
     <div style={{ ...row, justifyContent: isUser ? 'flex-end' : 'flex-start' }}>
@@ -380,7 +382,7 @@ function MessageRow({ m }: { m: StreamMessage }) {
       >
         <div style={kindLabel}>
           <Icon name={KIND_ICON[m.kind]} size={11} strokeWidth={2} />
-          <span>{KIND_LABEL[m.kind]}</span>
+          <span>{mt(KIND_LABEL_KEY[m.kind])}</span>
           <span style={ts}>{formatTime(m.ts)}</span>
         </div>
         {m.kind === 'summary' ? (
@@ -538,14 +540,14 @@ function formatTime(ts: number): string {
 
 // ─── kind-specific styling ──────────────────────────────────────────────────
 
-const KIND_LABEL: Record<StreamMessageKind, string> = {
-  system: '系统',
-  pipeline: '流水线',
-  review: '审批',
-  decision: '我',
-  summary: '总结',
-  error: '出错了',
-  session: '会话',
+const KIND_LABEL_KEY: Record<StreamMessageKind, TranslationKey> = {
+  system: 'kindSystem',
+  pipeline: 'kindPipeline',
+  review: 'kindReview',
+  decision: 'kindDecision',
+  summary: 'kindSummary',
+  error: 'kindError',
+  session: 'kindSession',
 };
 
 const KIND_ICON: Record<StreamMessageKind, IconName> = {
@@ -955,7 +957,6 @@ const dataSourceBadge: React.CSSProperties = {
   fontWeight: tokens.fontWeight.medium,
   padding: '2px 8px',
   borderRadius: tokens.radius.pill,
-  marginLeft: 'auto',
 };
 
 const dataSourceBody: React.CSSProperties = {

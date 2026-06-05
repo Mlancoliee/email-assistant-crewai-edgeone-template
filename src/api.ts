@@ -185,10 +185,10 @@ export interface ConversationDetail {
  * ``ctx.conversation_id`` for list/delete — keeps logs grouped by tab and
  * lets the platform handle CORS/session middleware uniformly across handlers. */
 async function postHistory(body: Record<string, unknown>, conversationId?: string): Promise<unknown> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (conversationId) {
-    headers['makers-conversation-id'] = conversationId;
-  }
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'makers-conversation-id': conversationId || crypto.randomUUID(),
+  };
   const res = await fetch('/email/history', {
     method: 'POST',
     headers,
@@ -254,7 +254,14 @@ export async function deleteConversation(id: string): Promise<{ deleted: boolean
 /** Fetch the health endpoint to detect current email provider (mock/imap/gmail). */
 export async function getEmailProvider(): Promise<string> {
   try {
-    const res = await fetch('/email/health', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const res = await fetch('/email/health', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'makers-conversation-id': crypto.randomUUID(),
+      },
+      body: '{}',
+    });
     const data = (await res.json()) as { emailProvider?: string };
     return data.emailProvider || 'mock';
   } catch {

@@ -9,6 +9,7 @@
  */
 import { PIPELINE_NODES, PipelineNode, NodeStatus, ProgressPayload } from '../types';
 import { tokens } from '../design-tokens';
+import { useI18n, type TranslationKey } from '../i18n';
 import { Icon, IconName, IconSpinner } from '../icons';
 
 interface Props {
@@ -29,24 +30,24 @@ interface Props {
   progress?: ProgressPayload | null;
 }
 
-const NODE_LABEL: Record<PipelineNode, string> = {
-  fetch: '拉取邮件',
-  classify: '分类',
-  prioritize: '排序',
-  draft: '起草',
-  review: '审批',
-  apply: '应用',
-  summarize: '总结',
+const NODE_LABEL_KEY: Record<PipelineNode, TranslationKey> = {
+  fetch: 'pipelineFetch',
+  classify: 'pipelineClassify',
+  prioritize: 'pipelinePrioritize',
+  draft: 'pipelineDraft',
+  review: 'pipelineReview',
+  apply: 'pipelineApply',
+  summarize: 'pipelineSummarize',
 };
 
-const NODE_DESCRIPTION: Record<PipelineNode, string> = {
-  fetch: '从 Provider 取邮件、过滤 auto_archive',
-  classify: 'LLM 批量分类(9 大类)',
-  prioritize: 'VIP 加权 + 排序',
-  draft: 'CrewAI 三角色协作起草',
-  review: '人工审批(interrupt 暂停)',
-  apply: '保存草稿 / 标记 / 跳过',
-  summarize: 'LLM 生成日报',
+const NODE_DESC_KEY: Record<PipelineNode, TranslationKey> = {
+  fetch: 'pipelineFetchDesc',
+  classify: 'pipelineClassifyDesc',
+  prioritize: 'pipelinePrioritizeDesc',
+  draft: 'pipelineDraftDesc',
+  review: 'pipelineReviewDesc',
+  apply: 'pipelineApplyDesc',
+  summarize: 'pipelineSummarizeDesc',
 };
 
 export default function NodeFlowVisualizer({
@@ -54,11 +55,12 @@ export default function NodeFlowVisualizer({
   cachedNodes,
   progress,
 }: Props) {
+  const { t } = useI18n();
   return (
     <aside style={shell}>
       <h2 style={heading}>
         <Icon name="circle-dot" size={13} />
-        <span>流水线</span>
+        <span>{t('pipelineTitle')}</span>
       </h2>
       <ol style={list}>
         {PIPELINE_NODES.map((node, idx) => {
@@ -80,7 +82,7 @@ export default function NodeFlowVisualizer({
                 <div style={topLine}>
                   <Icon name={NODE_ICON[node]} size={12} />
                   <span style={{ ...labelText, color: status === 'active' ? tokens.color.brand : tokens.color.text }}>
-                    {NODE_LABEL[node]}
+                    {t(NODE_LABEL_KEY[node])}
                   </span>
                   {/* Cached chip outranks the normal status pill — when both
                       apply (a cached node MUST be ``done``), the cached chip
@@ -98,7 +100,7 @@ export default function NodeFlowVisualizer({
                 {/* Show description only for the active / paused node — keeps
                     the idle pipeline tight, like a real status timeline. */}
                 {(status === 'active' || status === 'paused') && (
-                  <div style={descText}>{NODE_DESCRIPTION[node]}</div>
+                  <div style={descText}>{t(NODE_DESC_KEY[node])}</div>
                 )}
                 {/* Live narration sits BELOW the description so the eye
                     flows label → static description → live what's-happening

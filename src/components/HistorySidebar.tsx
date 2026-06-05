@@ -31,6 +31,7 @@ import {
   invalidateConversationCache,
   listConversations,
 } from '../api';
+import { useI18n } from '../i18n';
 import {
   StoredConversation,
   getLocalConversations,
@@ -57,8 +58,7 @@ export default function HistorySidebar({
   refreshKey,
   busy,
 }: Props) {
-  // Initial state: synchronously read localStorage. This renders instantly
-  // — no loading skeleton, no network round-trip.
+  const { t } = useI18n();
   const [items, setItems] = useState<StoredConversation[]>(() =>
     getLocalConversations(),
   );
@@ -119,7 +119,7 @@ export default function HistorySidebar({
       <div style={topBar}>
         <h2 style={heading}>
           <Icon name="archive" size={13} />
-          <span>历史会话</span>
+          <span>{t('historyTitle')}</span>
         </h2>
       </div>
 
@@ -131,9 +131,9 @@ export default function HistorySidebar({
       )}
       {items.length === 0 && (
         <div style={emptyHint}>
-          <div style={emptyTitle}>暂无历史</div>
+          <div style={emptyTitle}>{t('historyEmpty')}</div>
           <div style={emptySub}>
-            点击「仅分类」或「处理待回邮件」开始,完成后会自动归档到这里
+            {t('historyEmptyHint')}
           </div>
           {/* Cloud-restore button — only shown when the local index is empty
               (new device or cleared cache). Pulls the platform-side
@@ -145,7 +145,7 @@ export default function HistorySidebar({
             style={cloudRestoreBtn}
           >
             {restoring ? <IconSpinner size={12} /> : <Icon name="refresh-cw" size={12} />}
-            <span>{restoring ? '正在恢复...' : '刷新'}</span>
+            <span>{restoring ? t('historyRestoring') : t('historyRestore')}</span>
           </button>
         </div>
       )}

@@ -11,6 +11,7 @@
  */
 import { useState } from 'react';
 import { tokens } from '../design-tokens';
+import { useI18n } from '../i18n';
 import { Icon } from '../icons';
 import { DraftItem, ReviewDecisionInput } from '../types';
 
@@ -24,6 +25,7 @@ interface Props {
 }
 
 export default function DraftReviewCard({ draft, remaining, onSubmit, disabled }: Props) {
+  const { t } = useI18n();
   const [body, setBody] = useState(draft.body);
   const [feedback, setFeedback] = useState('');
   const edited = body !== draft.body;
@@ -49,7 +51,7 @@ export default function DraftReviewCard({ draft, remaining, onSubmit, disabled }
       {draft.rationale && (
         <details style={rationaleDetails}>
           <summary style={rationaleSummary}>
-            为什么这样写?
+            {t('reviewRationale')}
           </summary>
           <div style={rationaleBody}>{draft.rationale}</div>
         </details>
@@ -70,7 +72,7 @@ export default function DraftReviewCard({ draft, remaining, onSubmit, disabled }
       <input
         type="text"
         value={feedback}
-        placeholder="(可选)给重写的反馈,比如「语气更正式」"
+        placeholder={t('reviewFeedbackPlaceholder')}
         onChange={(e) => setFeedback(e.target.value)}
         disabled={disabled}
         style={feedbackInput}
@@ -84,7 +86,7 @@ export default function DraftReviewCard({ draft, remaining, onSubmit, disabled }
             style={btn(tokens.color.success, true)}
           >
             <Icon name="check" size={13} strokeWidth={2.5} />
-            <span>用我改的版本</span>
+            <span>{t('reviewEditApprove')}</span>
           </button>
         ) : (
           <button
@@ -93,7 +95,7 @@ export default function DraftReviewCard({ draft, remaining, onSubmit, disabled }
             style={btn(tokens.color.success, true)}
           >
             <Icon name="check" size={13} strokeWidth={2.5} />
-            <span>通过</span>
+            <span>{t('reviewApprove')}</span>
           </button>
         )}
         <button
@@ -102,7 +104,7 @@ export default function DraftReviewCard({ draft, remaining, onSubmit, disabled }
           style={btn(tokens.color.info, false)}
         >
           <Icon name="refresh-cw" size={12} />
-          <span>重写</span>
+          <span>{t('reviewRegenerate')}</span>
         </button>
         <button
           disabled={disabled}
@@ -110,7 +112,7 @@ export default function DraftReviewCard({ draft, remaining, onSubmit, disabled }
           style={btn(tokens.color.danger, false)}
         >
           <Icon name="x" size={13} strokeWidth={2.5} />
-          <span>不回复</span>
+          <span>{t('reviewReject')}</span>
         </button>
         <button
           disabled={disabled}
@@ -118,7 +120,7 @@ export default function DraftReviewCard({ draft, remaining, onSubmit, disabled }
           style={btn(tokens.color.textMuted, false)}
         >
           <Icon name="skip-forward" size={12} />
-          <span>跳过</span>
+          <span>{t('reviewSkip')}</span>
         </button>
       </div>
     </div>

@@ -11,6 +11,7 @@
 import { useMemo, useState } from 'react';
 import { ClassifiedEmail, EmailCategory } from '../types';
 import { tokens } from '../design-tokens';
+import { useI18n, type TranslationKey } from '../i18n';
 import { Icon, IconName } from '../icons';
 
 interface Props {
@@ -51,16 +52,16 @@ interface Props {
   restoring?: boolean;
 }
 
-const CATEGORY_LABEL: Record<EmailCategory, string> = {
-  urgent_customer: '紧急客户',
-  meeting: '会议',
-  internal: '内部',
-  marketing: '营销',
-  notification: '通知',
-  followup: '跟进',
-  spam: '垃圾',
-  billing: '账单',
-  other: '其他',
+const CATEGORY_LABEL_KEY: Record<EmailCategory, TranslationKey> = {
+  urgent_customer: 'catUrgentCustomer',
+  meeting: 'catMeeting',
+  internal: 'catInternal',
+  marketing: 'catMarketing',
+  notification: 'catNotification',
+  followup: 'catFollowup',
+  spam: 'catSpam',
+  billing: 'catBilling',
+  other: 'catOther',
 };
 
 const CATEGORY_ICON: Record<EmailCategory, IconName> = {
@@ -111,50 +112,43 @@ export default function EmailInboxTree({
   actionsDisabled,
   restoring,
 }: Props) {
-  // Restoring takeover: when App.tsx is hydrating a past conversation,
-  // render skeleton INSTEAD of any other state (empty / loading / list).
-  // Same pattern as ConversationStream.tsx — keeps left and center
-  // columns visually consistent during the ~200-500ms fetch window so
-  // the user doesn't see the previous session's emails leaking through.
+  const { t } = useI18n();
+
+  // Restoring takeover
   if (restoring) {
     return (
       <aside style={shell}>
         <h2 style={heading}>
           <Icon name="inbox" size={13} />
-          <span>邮件分类</span>
+          <span>{t('inboxTitle')}</span>
         </h2>
         <InboxSkeleton />
       </aside>
     );
   }
   if (emails.length === 0) {
-    // Three states for the empty list, in priority order:
-    //   1. classifying: we already have raw fetched count, just waiting on the
-    //      LLM. Most informative state for the user.
-    //   2. refreshing: a run is in flight (fetch hasn't returned yet).
-    //   3. idle: the canonical "click a button to start" prompt.
     const title = classifying
-      ? `已拉取 ${fetchedCount ?? 0} 封,正在分类...`
+      ? t('inboxClassifying', { count: String(fetchedCount ?? 0) })
       : refreshing
-      ? '正在拉取邮件...'
-      : '等待拉取邮件';
+      ? t('inboxFetching')
+      : t('inboxEmpty');
     const hint = classifying
-      ? '正在给每封邮件打类别和优先级'
+      ? ''
       : refreshing
-      ? '正在从你的邮箱获取最新内容'
-      : '点击上方「拉取邮件」或「AI智能处理」开始';
+      ? ''
+      : t('inboxEmptyHint');
     return (
       <aside style={shell}>
         <h2 style={heading}>
           <Icon name="inbox" size={14} />
-          <span>收件箱</span>
+          <span>{t('inboxTitle')}</span>
         </h2>
         <div style={emptyState}>
           <div style={emptyIcon} aria-hidden>
             <Icon name="inbox" size={28} />
           </div>
           <div style={emptyTitle}>{title}</div>
-          <div style={emptyHint}>{hint}</div>
+          {hint && <div style={emptyHint}>{hint}</div>}
         </div>
       </aside>
     );
@@ -193,7 +187,7 @@ export default function EmailInboxTree({
     <aside style={shell}>
       <h2 style={heading}>
         <Icon name="inbox" size={14} />
-        <span>收件箱</span>
+        <span>{t('inboxTitle')}</span>
         <span style={countBadge}>{emails.length}</span>
         <button
           type="button"
@@ -238,10 +232,10 @@ export default function EmailInboxTree({
               onChange={(e) => setCategoryFilter(e.target.value as EmailCategory | '')}
               style={filterSelect}
             >
-              <option value="">全部类别</option>
+              <option value="">{t('allCategories')}</option>
               {CATEGORY_ORDER.map((cat) => (
                 <option key={cat} value={cat}>
-                  {CATEGORY_LABEL[cat]}
+                  {t(CATEGORY_LABEL_KEY[cat])}
                 </option>
               ))}
             </select>
@@ -250,9 +244,9 @@ export default function EmailInboxTree({
               onChange={(e) => setStatusFilter(e.target.value as 'all' | 'pending' | 'done')}
               style={filterSelect}
             >
-              <option value="all">全部状态</option>
-              <option value="pending">待处理</option>
-              <option value="done">已处理</option>
+              <option value="all">{t('statusAll')}</option>
+              <option value="pending">{t('statusPending')}</option>
+              <option value="done">{t('statusDone')}</option>
             </select>
           </div>
           {filtered.length !== emails.length && (
@@ -284,7 +278,7 @@ export default function EmailInboxTree({
       {/* Interaction hint — subtle, persistent nudge for first-time users */}
       <div style={interactionHint}>
         <Icon name="info" size={11} />
-        <span>点击邮件查看详情</span>
+        <span>{t('inboxHint')}</span>
       </div>
     </aside>
   );
@@ -307,12 +301,13 @@ function CategoryGroup({
   onSelectEmail?: (emailId: string) => void;
   actionsDisabled?: boolean;
 }) {
+  const { t } = useI18n();
   const sorted = [...emails].sort((a, b) => b.priority - a.priority);
   return (
     <section style={catShell}>
       <header style={{ ...catHeader, color: CATEGORY_COLOR[category] }}>
         <Icon name={CATEGORY_ICON[category]} size={13} />
-        <span>{CATEGORY_LABEL[category]}</span>
+        <span>{t(CATEGORY_LABEL_KEY[category])}</span>
         <span style={catCount}>{emails.length}</span>
       </header>
       <ul style={list}>
@@ -347,6 +342,7 @@ function EmailRow({
   onSelect?: (emailId: string) => void;
   actionsDisabled?: boolean;
 }) {
+  const { t } = useI18n();
   const senderRaw = classified.email.sender || classified.email.from_ || classified.email.from || '';
   const sender = friendlyName(senderRaw);
   // Inline action: show on every classified row so the user can force a
@@ -387,10 +383,10 @@ function EmailRow({
         {isDone && (
           <span style={doneTag}>
             <Icon name="check" size={10} strokeWidth={2.5} />
-            <span>已处理</span>
+            <span>{t('doneLabel')}</span>
           </span>
         )}
-        {isActive && <span style={activeTag}>审批中</span>}
+        {isActive && <span style={activeTag}>{t('activeLabel')}</span>}
         {showAction && (
           <button
             data-process-btn=""
@@ -404,10 +400,9 @@ function EmailRow({
               ...processBtn,
               cursor: actionsDisabled ? 'not-allowed' : 'pointer',
             }}
-            title="单独处理这一封邮件(跳过其它)"
+            title={t('processBtnTitle')}
           >
-            <Icon name="corner-down-left" size={11} strokeWidth={2} />
-            <span>处理</span>
+            <span>{t('processBtn')}</span>
           </button>
         )}
       </div>

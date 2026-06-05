@@ -25,6 +25,7 @@ import EmailDetailDrawer from './components/EmailDetailDrawer';
 import EmailInboxTree from './components/EmailInboxTree';
 import HistorySidebar from './components/HistorySidebar';
 import NodeFlowVisualizer from './components/NodeFlowVisualizer';
+import { useI18n } from './i18n';
 import {
   getConversation,
   getEmailProvider,
@@ -478,6 +479,7 @@ function errorStuckNode(
 // ─── Component ──────────────────────────────────────────────────────────────
 
 export default function App() {
+  const { t, locale, toggleLocale } = useI18n();
   const [messages, setMessages] = useState<StreamMessage[]>([]);
   const [pending, setPending] = useState<PendingDraft | null>(null);
   const [running, setRunning] = useState(false);
@@ -1266,13 +1268,23 @@ export default function App() {
               <Icon name="mail" size={18} strokeWidth={2} />
             </div>
             <div>
-              <h1 style={appTitle}>AI 邮件管家</h1>
+              <h1 style={appTitle}>{t('appTitle')}</h1>
               <span style={appSubtitle}>
-                LangGraph · CrewAI · Human-in-the-loop
+                {t('appSubtitle')}
               </span>
             </div>
           </div>
-          <RuntimeStatusChip
+          {/* Language toggle */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space[3] }}>
+            <button
+              type="button"
+              onClick={toggleLocale}
+              style={langToggleBtn}
+              title="Switch language / 切换语言"
+            >
+              {locale === 'zh' ? 'EN' : '中文'}
+            </button>
+            <RuntimeStatusChip
             running={running}
             paused={!!pending}
             messagesCount={messages.length}
@@ -1280,6 +1292,7 @@ export default function App() {
             total={displayTotal}
             showCounter={showCounter}
           />
+          </div>
         </div>
       }
       toolbar={
@@ -1289,29 +1302,29 @@ export default function App() {
               onClick={() => startRun('triage_only', { forceRefresh: true })}
               disabled={running || restoring || !initialized}
               style={primaryBtn}
-              title="从邮箱拉取最新邮件并智能分类"
+              title={t('fetchEmails')}
             >
               <Icon name="inbox" size={14} />
-              <span>拉取邮件</span>
+              <span>{t('fetchEmails')}</span>
             </button>
             <button
               onClick={() => setShowAiConfirm(true)}
               disabled={running || restoring || !initialized}
               style={primaryBtn}
-              title="AI 挑出最该回的邮件，逐封起草并等你审批"
+              title={t('aiSmartProcess')}
             >
               <Icon name="sparkles" size={14} />
-              <span>AI 智能处理</span>
+              <span>{t('aiSmartProcess')}</span>
             </button>
             {running && (
               <button
                 type="button"
                 onClick={stopCurrentRun}
                 style={stopBtn}
-                title="发送停止信号"
+                title={t('stop')}
               >
                 <Icon name="x" size={13} strokeWidth={2.5} />
-                <span>停止</span>
+                <span>{t('stop')}</span>
               </button>
             )}
           </div>
@@ -1320,20 +1333,20 @@ export default function App() {
             onClick={startNewSession}
             disabled={running || restoring || !initialized}
             style={{ ...newSessionBtn, marginLeft: 'auto' }}
-            title="开始一个新的对话"
+            title={t('newSession')}
           >
             <Icon name="sparkles" size={13} />
-            <span>新会话</span>
+            <span>{t('newSession')}</span>
           </button>
           <button
             type="button"
             onClick={() => setHistoryOpen((v) => !v)}
             style={historyToggleBtn}
             aria-pressed={historyOpen}
-            title="展开/收起历史会话面板"
+            title={t('history')}
           >
             <Icon name="archive" size={13} />
-            <span>历史</span>
+            <span>{t('history')}</span>
           </button>
         </div>
       }
@@ -1403,16 +1416,14 @@ export default function App() {
             emailProvider={emailProvider}
           />
         ) : (
-          // Mount-time loading. Without this gate the user briefly sees the
-          // OnboardingPanel and then it abruptly swaps to the restored
-          // timeline once /email/history GET resolves (~200ms typically).
-          // A spinner-and-text card makes the transition feel intentional.
-          <main style={loadingShell}>
-            <div style={loadingCard}>
-              <IconSpinner size={18} />
-              <span>正在加载会话...</span>
-            </div>
-          </main>
+          // Mount-time loading — show the same skeleton as session restore
+          // so the user sees a consistent loading state regardless of whether
+          // they're refreshing the page or switching history sessions.
+          <ConversationStream
+            messages={[]}
+            restoring={true}
+            emailProvider={emailProvider}
+          />
         )
       }
       right={
@@ -1424,23 +1435,23 @@ export default function App() {
       }
     />
 
-    {/* AI 智能处理 confirmation modal */}
+    {/* AI Smart Process confirmation modal */}
     {showAiConfirm && (
       <div style={modalBackdrop} onClick={() => setShowAiConfirm(false)}>
         <div style={modalCard} onClick={(e) => e.stopPropagation()}>
           <div style={modalIcon}>
             <Icon name="sparkles" size={20} />
           </div>
-          <h3 style={modalTitle}>AI 智能处理</h3>
+          <h3 style={modalTitle}>{t('aiConfirmTitle')}</h3>
           <p style={modalBody}>
-            AI 将从你的收件箱中挑选需要回复的邮件，逐封起草回复并等待你审批。你可以随时停止。
+            {t('aiConfirmBody')}
           </p>
           <div style={modalActions}>
             <button
               style={modalCancelBtn}
               onClick={() => setShowAiConfirm(false)}
             >
-              取消
+              {t('aiConfirmCancel')}
             </button>
             <button
               style={modalConfirmBtn}
@@ -1449,7 +1460,7 @@ export default function App() {
                 startRun('daily_digest');
               }}
             >
-              开始处理
+              {t('aiConfirmStart')}
             </button>
           </div>
         </div>
@@ -1628,6 +1639,18 @@ const historyToggleBtn: React.CSSProperties = {
   color: tokens.color.textSubtle,
   background: 'transparent',
   border: `1px solid ${tokens.color.border}`,
+  cursor: 'pointer',
+  lineHeight: 1.2,
+};
+
+const langToggleBtn: React.CSSProperties = {
+  padding: '5px 10px',
+  borderRadius: tokens.radius.md,
+  border: `1px solid ${tokens.color.border}`,
+  background: tokens.color.bg,
+  color: tokens.color.textMuted,
+  fontSize: tokens.fontSize.xs,
+  fontWeight: tokens.fontWeight.medium,
   cursor: 'pointer',
   lineHeight: 1.2,
 };
