@@ -337,7 +337,7 @@ class IMAPProvider:
     Connection model: open + login + logout per call. EdgeOne agent handlers
     are short-lived; long-lived connections would risk being killed mid-flight
     by the SCF runtime. The cost (~200ms IMAP login per call) is acceptable
-    for a triage workflow that runs once per cron tick or per user click.
+    for a triage workflow that runs once per user click.
 
     Folder semantics:
       - ``fetch_inbox`` reads from ``INBOX``

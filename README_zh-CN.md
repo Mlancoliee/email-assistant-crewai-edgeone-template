@@ -1,172 +1,164 @@
-# 邮件处理助手
+# AI 邮件助手
 
-基于 LangGraph + CrewAI (Python) 的 EdgeOne Makers Agent 全栈项目模板。演示多 Agent 协作、人机协作 (HITL) 审批流程，以及三栏式 SaaS UI 的实时 SSE 流式交互。
+> 基于 LangGraph + CrewAI 构建的多 Agent 邮件分类与回复起草助手，部署在 EdgeOne Makers 上 — 自动分类收件箱、三角色协作起草回复、人工审批后再执行。
 
-## 部署
-[![使用 EdgeOne Makers 部署](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://console.cloud.tencent.com/edgeone/makers/new?template=email-assistant-agent&from=within&fromAgent=1&agentLang=python)
+**框架:** LangGraph · **分类:** 编排 · **语言:** Python
 
-## 功能
+[![部署到 EdgeOne Makers](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://console.cloud.tencent.com/edgeone/makers/new?template=email-assistant-agent&from=within&fromAgent=1&agentLang=python)
 
-- **多 Agent 协作** — CrewAI 三角色流水线（过滤 / 撰写 / 润色）生成邮件回复草稿
-- **人机协作 (HITL)** — LangGraph `interrupt()` 在审批节点暂停，用户可通过/编辑/驳回/重写/跳过每封草稿
-- **SSE 流式输出** — 逐 token 显示草稿撰写过程 + 逐节点进度播报
-- **IMAP 邮箱集成** — 配置环境变量即可连接真实 Gmail/Outlook/QQ 邮箱
-- **会话记忆** — 通过 `context.store.langgraph_checkpointer` 实现 LangGraph 状态持久化
-- **三栏布局 UI** — 邮件分类树（左）+ 对话时间线（中）+ 流水线可视化（右）
-- **停止与恢复** — 三层中断保障（客户端 abort + 服务端 stop + localStorage 标记）
+## 概览
 
-## 目录结构
+AI 邮件助手端到端处理收件箱：拉取邮件、LLM 分类、按用户规则排序，然后用三角色 CrewAI 流水线（分析师 → 撰稿员 → 润色员）起草回复。每封草稿都会暂停在人机协作检查点 — 你可以通过、编辑、驳回或要求重写，确认后系统才执行操作。整个流水线通过 SSE 向 React 前端实时推送进度。
 
-```text
-email-assistant/
-├── agents/                        # Python 后端（EdgeOne Makers Functions）
-│   └── email/
-│       ├── run.py                # POST /email/run — SSE 流式主入口
-│       ├── review.py             # POST /email/review — HITL 恢复
-│       ├── history.py            # POST /email/history — 会话列表/详情/删除
-│       ├── stop.py               # POST /email/stop — 中断运行
-│       ├── scheduled.py          # POST /email/scheduled — 定时触发
-│       ├── health.py             # POST /email/health — 探活
-│       ├── _graph.py             # LangGraph StateGraph 定义
-│       ├── _nodes.py             # 8 个图节点（拉取/分类/排序/起草/审批/执行/总结/中止）
-│       ├── _crew.py              # CrewAI 子流水线装配
-│       ├── _agents.py            # 3 个 CrewAI Agent 构建器
-│       ├── _tasks.py             # 3 个 CrewAI Task
-│       ├── _tools.py             # CrewAI 工具（语气/模板/线程上下文）
-│       ├── _models.py            # Pydantic v2 数据模型
-│       ├── _providers.py         # 邮件 Provider（Mock + IMAP）
-│       ├── _llm.py               # AI Gateway LLM 工厂
-│       ├── _events.py            # CrewAI → LangGraph 事件桥接
-│       ├── _sse_utils.py         # SSE 序列化工具
-│       ├── _state.py             # LangGraph 状态 TypedDict
-│       ├── _routing.py           # 条件边函数
-│       ├── _skill_loader.py      # SKILL.md 解析器
-│       ├── fixtures/             # 10 封示例 .eml 文件 + user_rules.json
-│       ├── skills/               # email-tone + email-templates
-│       └── prompts/              # classifier.md / prioritizer.md / summarizer.md
-├── src/                           # React 前端（Vite + TypeScript）
-│   ├── App.tsx                   # 主状态机（约 1500 行）
-│   ├── api.ts                    # SSE 解析 + 会话 CRUD
-│   ├── types.ts                  # 类型定义
-│   ├── design-tokens.ts          # 设计系统 token
-│   ├── historyStorage.ts         # localStorage 会话索引
-│   ├── icons.tsx                 # Lucide SVG 图标
-│   ├── index.css                 # 全局样式 + 关键帧动画
-│   └── components/
-│       ├── ChatLayout.tsx        # 三栏响应式布局 + 历史抽屉
-│       ├── EmailInboxTree.tsx    # 左栏 — 邮件分类树
-│       ├── ConversationStream.tsx # 中栏 — 消息时间线
-│       ├── DraftReviewCard.tsx   # HITL 审批卡（通过/编辑/驳回/重写/跳过）
-│       ├── EmailDetailDrawer.tsx # 滑出式邮件详情面板
-│       ├── NodeFlowVisualizer.tsx # 右栏 — 流水线节点状态
-│       └── HistorySidebar.tsx    # 历史会话侧栏（localStorage 驱动）
-├── index.html                    # 入口 HTML（Inter + JetBrains Mono 字体）
-├── edgeone.json                  # EdgeOne 项目配置
-├── package.json                  # 前端依赖
-├── requirements.txt              # Python 依赖
-├── vite.config.ts                # Vite 配置
-├── tsconfig.json                 # TypeScript 配置
-└── .env.example                  # 环境变量参考
-```
-
-> 以 `_` 开头的文件是私有模块，不会被 EdgeOne 映射为公开路由。
+- **多 Agent 协作起草** — 三角色 CrewAI 串行流水线（分析师、撰稿员、润色员），产出贴合语境和语气的回复
+- **人机协作审批** — LangGraph `interrupt()` 在每封草稿处暂停流水线；支持通过 / 编辑 / 驳回 / 重写 / 跳过
+- **实时流水线可视化** — SSE 推送节点级进度；前端渲染活动流程图 + 实时文字播报
+- **可插拔邮件源** — 内置 10 封模拟邮件；设置一个环境变量即可切换到真实 IMAP 邮箱
 
 ## 环境变量
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `AI_GATEWAY_API_KEY` | 是 | LLM API 密钥（平台自动注入） |
-| `AI_GATEWAY_BASE_URL` | 是 | LLM API 地址（OpenAI 兼容） |
-| `EMAIL_PROVIDER` | 否 | `mock`（默认）或 `imap` |
-| `IMAP_HOST` | imap 时必填 | IMAP 服务器地址（如 `imap.gmail.com`） |
-| `IMAP_USER` | imap 时必填 | 邮箱地址 |
-| `IMAP_APP_PASSWORD` | imap 时必填 | 应用专用密码 |
-| `IMAP_PORT` | 否 | 默认 `993` |
-| `IMAP_USE_SSL` | 否 | 默认 `true` |
+| `AI_GATEWAY_API_KEY` | 是 | 模型网关 API Key。使用 **Makers Models API Key**，或任何 OpenAI 兼容的服务商密钥。 |
+| `AI_GATEWAY_BASE_URL` | 是 | 网关 Base URL。Makers Models 填 `https://ai-gateway.edgeone.link/v1`。 |
+| `AI_GATEWAY_MODEL` | 否 | 模型 ID。默认 `@makers/hy3-preview`（免费内置模型）。 |
+| `EMAIL_PROVIDER` | 否 | `mock`（默认）或 `imap`。控制邮件数据来源。 |
+| `IMAP_HOST` | 否 | IMAP 服务器地址（如 `imap.gmail.com`）。`EMAIL_PROVIDER=imap` 时必填。 |
+| `IMAP_USER` | 否 | IMAP 登录用户名 / 邮箱地址。 |
+| `IMAP_APP_PASSWORD` | 否 | 应用专用密码（Gmail: [在此创建](https://myaccount.google.com/apppasswords)）。 |
 
-### 连接真实 Gmail 邮箱（IMAP）
+> 本模板遵循 **OpenAI 兼容** 标准 — 可将上述变量指向 Makers Models 或任何兼容的网关/服务商。
 
-按照以下步骤将你的 Gmail 接入模板：
+### 如何获取 `AI_GATEWAY_API_KEY`
 
-1. **开启两步验证**
-   - 打开 [Google 账号安全设置](https://myaccount.google.com/security)
-   - 在「登录 Google 的方式」中，启用**两步验证**
+1. 打开 [Makers 控制台](https://console.cloud.tencent.com/edgeone/makers)。
+2. 登录并开通 Makers。
+3. 进入 **Makers → Models → API Key**，创建一个密钥。
+4. 将密钥填入 `AI_GATEWAY_API_KEY`（`AI_GATEWAY_BASE_URL` 设为 `https://ai-gateway.edgeone.link/v1`）。
 
-2. **生成应用专用密码**
-   - 打开 [应用专用密码](https://myaccount.google.com/apppasswords)
-   - 选择应用："邮件"，选择设备："其他（自定义名称）" → 输入 "Email Assistant"
-   - 点击**生成** → 复制生成的 16 位密码（格式如 `abcd efgh ijkl mnop`）
+内置模型（`@makers/deepseek-v4-flash`、`@makers/hy3-preview`、`@makers/minimax-m2.7`）免费但有速率限制，适合原型验证。生产环境请在控制台绑定自有服务商密钥（BYOK）。
 
-3. **配置环境变量**
+### 连接真实邮箱（IMAP）
+
+以 Gmail 为例：
+
+1. 开启 [两步验证](https://myaccount.google.com/security)
+2. 生成 [应用专用密码](https://myaccount.google.com/apppasswords)（选择"邮件" → "其他"）
+3. 配置环境变量：
    ```bash
    EMAIL_PROVIDER=imap
    IMAP_HOST=imap.gmail.com
    IMAP_USER=yourname@gmail.com
-   IMAP_APP_PASSWORD=abcdefghijklmnop   # 去掉空格填入
+   IMAP_APP_PASSWORD=abcdefghijklmnop
    ```
 
-4. **部署或重启** — 下次运行将从你的真实收件箱拉取邮件。
+> 其他邮箱：Outlook (`outlook.office365.com`)、QQ 邮箱 (`imap.qq.com`)、163 (`imap.163.com`) — 替换 `IMAP_HOST` 并使用对应的授权码。
 
-> **其他邮箱说明：** 其他支持 IMAP 的邮箱（Outlook、QQ 邮箱、163 等）配置方式类似，只需修改 `IMAP_HOST` 并使用对应的授权码：
-> - Outlook：`IMAP_HOST=outlook.office365.com`
-> - QQ 邮箱：`IMAP_HOST=imap.qq.com`（在 QQ 邮箱设置中生成授权码）
-> - 163 邮箱：`IMAP_HOST=imap.163.com`（在 163 设置中开启 IMAP 并获取授权码）
+## 本地开发
 
-## API 接口
+**前置依赖:** Node.js, npm, Python 3.11+
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/email/run` | POST | SSE 流式运行，Header 带 `makers-conversation-id` |
-| `/email/review` | POST | 从 HITL 中断恢复，Header 带 `makers-conversation-id` |
-| `/email/history` | POST | 会话列表/详情/删除，Body 传 `{ "action": "list" \| "get" \| "delete" }` |
-| `/email/stop` | POST | 中断正在执行的运行，Header 带 `makers-conversation-id` |
-| `/email/scheduled` | POST | 定时触发的每日摘要 |
-| `/email/health` | POST | 探活检查 |
+```bash
+npm install
+cp .env.example .env
+# 在 .env 中填入 AI_GATEWAY_API_KEY 和 AI_GATEWAY_BASE_URL
+edgeone makers dev
+```
 
-### SSE 事件
+打开 `http://localhost:8080/agent-metrics` 查看本地可观测面板。
+
+## 项目结构
+
+```text
+email-assistant/
+├── agents/email/                   # 后端: Python Agent 处理器
+│   ├── run.py                      # /email/run — SSE 主入口 (fetch→classify→draft→review 循环)
+│   ├── review.py                   # /email/review — 人机协作恢复 (Command(resume=decision))
+│   ├── history.py                  # /email/history — 会话列表 / 详情 / 删除
+│   ├── stop.py                     # /email/stop — 中止当前运行
+│   ├── health.py                   # /email/health — 存活探针 + provider 信息
+│   ├── _graph.py                   # LangGraph StateGraph 定义 & 编译
+│   ├── _state.py                   # EmailAssistantState TypedDict
+│   ├── _nodes.py                   # 7 个节点函数 (fetch, classify, prioritize, draft, review, apply, summarize)
+│   ├── _routing.py                 # 3 个条件边函数
+│   ├── _crew.py                    # CrewAI crew 适配器 (构建 kickoff 输入)
+│   ├── _models.py                  # Pydantic v2 领域模型 (Email, DraftItem, ReviewDecision 等)
+│   ├── _providers.py               # EmailProvider 协议 + MockProvider + IMAPProvider
+│   ├── _events.py                  # CrewAI→LangGraph 事件桥 (跨线程)
+│   ├── _llm.py                     # LLM 客户端初始化 (AI Gateway)
+│   ├── _tools.py                   # CrewAI BaseTool 实现 (Tone, Template, ThreadContext)
+│   ├── _crews/                     # @CrewBase crew 定义 (YAML agents + tasks)
+│   ├── fixtures/                   # 10 封模拟 .eml 文件 + user_rules.json
+│   ├── skills/                     # Skill 定义 (email-tone, email-templates, triage-rules)
+│   └── prompts/                    # LangGraph 节点的系统提示词
+├── src/                            # 前端: React + Vite
+│   ├── App.tsx                     # SSE 状态机 + pipeline reducer
+│   ├── components/
+│   │   ├── ChatLayout.tsx          # 三栏响应式布局
+│   │   ├── EmailInboxTree.tsx      # 左栏: 分类收件箱 + 搜索/筛选
+│   │   ├── ConversationStream.tsx  # 中栏: 消息时间线 + 流式气泡
+│   │   ├── DraftReviewCard.tsx     # 人机协作审批卡 (通过/编辑/驳回/重写/跳过)
+│   │   ├── NodeFlowVisualizer.tsx  # 右栏: 流水线节点状态
+│   │   ├── EmailDetailDrawer.tsx   # 邮件详情滑出面板
+│   │   └── HistorySidebar.tsx      # 历史会话侧栏
+│   ├── i18n.tsx                    # 国际化 (中/英)
+│   └── historyStorage.ts           # localStorage 会话索引
+├── edgeone.json                    # Agent 运行时配置
+├── requirements.txt                # Python 依赖
+└── package.json                    # 前端构建
+```
+
+> 以 `_` 开头的文件是私有模块 — 不会被 EdgeOne 暴露为公开路由。
+
+## 工作原理
+
+Agent 以 **会话模式** 运行在 `agents/email/` 下。共享相同 `conversation_id` 的请求会路由到同一份 LangGraph checkpoint，从而支持跨请求的人机协作循环。
+
+### 流水线流程
 
 ```
-event: session              data: {"type":"session","conversationId":"...","task":"daily_digest"}
-event: state_update         data: {"classify":{"classified":[...]}}
-event: progress             data: {"phase":"draft","stage":"started","message":"正在起草..."}
-event: human_review_required data: {"draft":{...},"remaining":2}
-event: done                 data: {"summary":"..."}
-event: error_message        data: {"error":"..."}
+拉取 → 分类 → 排序 → [起草 → 审批 → 执行]* → 总结
+                       ↑_____ 重写 _____|
+```
+
+1. **拉取** (`/email/run`) — 从配置的 provider 拉取邮件（模拟数据或真实 IMAP），自动归档命中用户规则的发件人。
+2. **分类** — 单次 LLM 批量调用，为每封邮件打上类别、优先级（0–100）和 `needs_reply` 标记。
+3. **排序** — 应用 VIP 域名加权和用户规则，过滤出需要处理的邮件，按优先级降序排列。
+4. **起草**（逐封） — 三角色 CrewAI 流水线串行执行：
+   - *分析师*：阅读邮件，产出结构化分析简报（意图、关键点、建议模板/语气）
+   - *撰稿员*：根据简报 + 可选模板起草回复正文
+   - *润色员*：调整语气、追加签名，输出类型化的 `DraftItem` JSON
+5. **审批** — 调用 `interrupt()`，图暂停。SSE 流推送 `human_review_required` 事件后关闭连接。前端渲染 `DraftReviewCard`。
+6. **恢复** (`/email/review`) — 用户的决定（通过 / 编辑 / 驳回 / 重写 / 跳过）发回后端。LangGraph 从 checkpoint 恢复，通过 `Command(resume=decision)` 继续执行。
+7. **执行** — 根据决定执行操作（保存草稿、归档、标记已读）。`cursor` 前进；如果还有邮件待处理，回到第 4 步。
+8. **总结** — 生成本次处理的 Markdown 摘要。
+
+### 关键技术细节
+
+- **SSE 流式传输**：`stream_mode=["updates", "custom"]` — `updates` 驱动流水线可视化；`custom` 传递实时文字播报（progress 事件）。
+- **Conversation ID**：通过 `Makers-Conversation-Id` 请求头传递。平台内置的 checkpointer（`context.store.langgraph_checkpointer`）按 thread 持久化图状态。
+- **CrewAI 集成**：`crew.kickoff()` 是同步阻塞的 — 用 `asyncio.to_thread()` 包装。事件通过 `loop.call_soon_threadsafe` 桥接到异步 loop。
+- **超时**：`edgeone.json` 中 `agents.timeout = 1800`（30 分钟），适应多封邮件的长会话场景。
+
+### SSE 事件协议
+
+```
+event: session              → {"type":"session","conversationId":"...","task":"daily_digest"}
+event: state_update         → {"classify":{"classified":[...]}}
+event: progress             → {"phase":"draft","stage":"started","message":"正在起草..."}
+event: human_review_required → {"draft":{...},"remaining":2}
+event: done                 → {"summary":"..."}
+event: error_message        → {"error":"..."}
 data: [PAUSED]              # 运行暂停（等待审批）
 data: [DONE]                # 运行完成
 data: [CANCELLED]           # 运行被取消
 ```
 
-## 架构
+## 相关资源
 
-### 后端（`agents/email/`）
-
-1. **LangGraph StateGraph** — 8 个节点编排完整的邮件处理流水线
-2. **CrewAI 子流水线** — 三 Agent 草稿生成（过滤 → 撰写 → 润色）
-3. **HITL `interrupt()`** — 图在 `review` 节点暂停，通过 `/email/review` 恢复
-4. **双流模式** — `stream_mode=["updates","custom"]` 同时输出状态变更和进度播报
-5. **邮件 Provider 抽象** — MockProvider（示例数据）/ IMAPProvider（真实邮箱），通过 `EMAIL_PROVIDER` 环境变量切换
-
-### 前端（`src/`）
-
-- `App.tsx` — SSE 状态机 + pipeline reducer + HITL 流程编排
-- `api.ts` — SSE 解析 + 会话历史 CRUD + 模块级缓存
-- `historyStorage.ts` — localStorage 会话索引（侧栏即时渲染，0ms 首屏）
-- `components/ChatLayout.tsx` — 三栏响应式网格 + 历史抽屉覆盖层
-- `components/ConversationStream.tsx` — 消息时间线 + 骨架屏加载态
-- `components/DraftReviewCard.tsx` — 行内 HITL 卡片（通过 / 编辑 / 驳回 / 重写 / 跳过）
-- `components/EmailInboxTree.tsx` — 分类收件箱 + 优先级徽标 + 操作按钮
-
-## 本地开发
-
-```bash
-# 安装前端依赖
-npm install
-
-# 启动 EdgeOne 本地开发（前后端同时启动）
-edgeone pages dev
-```
-
+- [Makers Agents 文档](https://pages.edgeone.ai/zh/document/agents)
+- [快速开始: Agent 开发](https://pages.edgeone.ai/zh/document/agents-quickstart)
+- [Makers Models](https://pages.edgeone.ai/zh/document/models)
 ## 许可证
 
 MIT

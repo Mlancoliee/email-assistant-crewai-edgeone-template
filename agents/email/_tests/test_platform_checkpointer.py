@@ -1,6 +1,6 @@
 """Integration tests against the platform's real LangGraph checkpointer.
 
-W3 D1 deliverable. Our handlers (``run.py`` / ``review.py`` / ``scheduled.py``)
+W3 D1 deliverable. Our handlers (``run.py`` / ``review.py``)
 all use ``ctx.store.langgraph_checkpointer`` — at deploy time this is the
 platform-provided ``_LangGraphCheckpointerAdapter`` from
 ``.edgeone/agent-python/_platform/memory.py``. Locally and in CI we use
@@ -242,8 +242,8 @@ def test_cross_session_resume_with_edited_body(tmp_path):
 
 def test_separate_thread_ids_isolate_checkpoints(tmp_path):
     """Two different conversation_ids must produce independent checkpoints
-    — critical for the cron path which uses ``scheduled:{date}:{run_id}`` and
-    must NEVER interfere with a parallel user conversation."""
+    — critical for multi-session isolation where each user conversation
+    must NEVER interfere with another."""
     memory = _make_memory(tmp_path)
     saver = memory.langgraph_checkpointer
 

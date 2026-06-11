@@ -2,10 +2,7 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "agents": {
-    "scene": ["process"],
-    "tags": ["CrewAI", "LangGraph", "多 Agent", "人机协作"],
     "runtime": "python",
-    "slug": "email-assistant",
     "framework": "langgraph",
     "timeout": 1800
   }

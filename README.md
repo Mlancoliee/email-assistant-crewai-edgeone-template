@@ -1,171 +1,134 @@
-# Email Assistant
+# AI Email Assistant
 
-A full-stack EdgeOne Makers Agent template powered by LangGraph + CrewAI (Python). Demonstrates multi-agent collaboration, human-in-the-loop (HITL) approval workflows, and real-time SSE streaming with a three-column SaaS UI.
+> A multi-agent email triage and reply-drafting assistant built with LangGraph + CrewAI on EdgeOne Makers — classifies your inbox, drafts replies with a three-role crew, and lets you approve before anything is sent.
 
-## deploy
+**Framework:** LangGraph · **Category:** Orchestration · **Language:** Python
+
 [![Deploy to EdgeOne Makers](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://edgeone.ai/makers/new?template=email-assistant-agent&from=within&fromAgent=1&agentLang=python)
 
-## Features
+## Overview
 
-- **Multi-Agent Collaboration** — CrewAI three-role pipeline (filter / writer / polisher) generates email drafts
-- **Human-in-the-Loop** — LangGraph `interrupt()` pauses at the review node; user approves / edits / rejects / regenerates / skips each draft
-- **SSE Streaming** — Token-by-token draft writing + per-node progress narration in real time
-- **IMAP Integration** — Connect a real Gmail/Outlook/QQ mailbox via environment variables
-- **Session Memory** — LangGraph checkpointer via `context.store.langgraph_checkpointer`
-- **Three-Column UI** — Inbox tree (left) + conversation timeline (center) + pipeline visualizer (right)
-- **Stop & Resume** — Triple-layer cancellation (client abort + server stop + localStorage flag)
+AI Email Assistant processes an inbox end-to-end: it fetches emails, classifies them with an LLM, prioritizes by user-defined rules, and drafts replies using a three-agent CrewAI crew (Analyst → Writer → Polisher). Every draft pauses at a human-in-the-loop checkpoint — you approve, edit, reject, or regenerate before the system takes action. The pipeline streams real-time progress to a React UI via SSE.
 
-## Directory Structure
-
-```text
-email-assistant/
-├── agents/                        # Python backend (EdgeOne Makers Functions)
-│   └── email/
-│       ├── run.py                # POST /email/run — SSE streaming main entry
-│       ├── review.py             # POST /email/review — HITL resume
-│       ├── history.py            # POST /email/history — conversation list/get/delete
-│       ├── stop.py               # POST /email/stop — abort active run
-│       ├── scheduled.py          # POST /email/scheduled — cron trigger
-│       ├── health.py             # POST /email/health — health check
-│       ├── _graph.py             # LangGraph StateGraph definition
-│       ├── _nodes.py             # 8 graph nodes (fetch/classify/prioritize/draft/review/apply/summarize/abort)
-│       ├── _crew.py              # CrewAI sub-pipeline assembly
-│       ├── _agents.py            # 3 CrewAI Agent builders
-│       ├── _tasks.py             # 3 CrewAI Tasks
-│       ├── _tools.py             # CrewAI tools (tone/template/thread-context)
-│       ├── _models.py            # Pydantic v2 data models
-│       ├── _providers.py         # Email providers (Mock + IMAP)
-│       ├── _llm.py               # AI Gateway LLM factory
-│       ├── _events.py            # CrewAI → LangGraph event bridge
-│       ├── _sse_utils.py         # SSE serialization utilities
-│       ├── _state.py             # LangGraph state TypedDict
-│       ├── _routing.py           # Conditional edge functions
-│       ├── _skill_loader.py      # SKILL.md parser
-│       ├── fixtures/             # 10 sample .eml files + user_rules.json
-│       ├── skills/               # email-tone + email-templates
-│       └── prompts/              # classifier.md / prioritizer.md / summarizer.md
-├── src/                           # React frontend (Vite + TypeScript)
-│   ├── App.tsx                   # Main state machine (~1500 lines)
-│   ├── api.ts                    # SSE parsing + history CRUD
-│   ├── types.ts                  # Type definitions
-│   ├── design-tokens.ts          # Design system tokens
-│   ├── historyStorage.ts         # localStorage conversation index
-│   ├── icons.tsx                 # Lucide SVG icons
-│   ├── index.css                 # Global styles + keyframes
-│   └── components/
-│       ├── ChatLayout.tsx        # Three-column responsive shell + history drawer
-│       ├── EmailInboxTree.tsx    # Left column — classified inbox tree
-│       ├── ConversationStream.tsx # Center column — message timeline
-│       ├── DraftReviewCard.tsx   # HITL approval card (approve/edit/reject/regenerate/skip)
-│       ├── EmailDetailDrawer.tsx # Slide-out email detail panel
-│       ├── NodeFlowVisualizer.tsx # Right column — pipeline node status
-│       └── HistorySidebar.tsx    # History sidebar (localStorage-backed)
-├── index.html                    # Entry HTML (Inter + JetBrains Mono fonts)
-├── edgeone.json                  # EdgeOne project config
-├── package.json                  # Frontend dependencies
-├── requirements.txt              # Python dependencies
-├── vite.config.ts                # Vite config
-├── tsconfig.json                 # TypeScript config
-└── .env.example                  # Environment variable reference
-```
-
-> Files prefixed with `_` are private modules — not mapped as public routes by EdgeOne.
+- **Multi-agent drafting** — a sequential CrewAI crew (triage analyst, reply writer, voice polisher) produces context-aware, tone-matched replies
+- **Human-in-the-loop approval** — LangGraph `interrupt()` pauses the pipeline at each draft; resume with approve / edit / reject / regenerate / skip
+- **Real-time pipeline visualization** — SSE streams node-level progress; the UI renders a live flow diagram + streaming narration
+- **Pluggable email source** — ships with 10 realistic mock emails; switch to a live IMAP mailbox with one env var
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `AI_GATEWAY_API_KEY` | Yes | LLM API key (injected by platform) |
-| `AI_GATEWAY_BASE_URL` | Yes | LLM API base URL (OpenAI-compatible) |
-| `EMAIL_PROVIDER` | No | `mock` (default) or `imap` |
-| `IMAP_HOST` | When `imap` | IMAP server host (e.g. `imap.gmail.com`) |
-| `IMAP_USER` | When `imap` | Email address |
-| `IMAP_APP_PASSWORD` | When `imap` | App-specific password |
-| `IMAP_PORT` | No | Default `993` |
-| `IMAP_USE_SSL` | No | Default `true` |
+| `AI_GATEWAY_API_KEY` | Yes | Model gateway API key. Use your **Makers Models API Key**, or any OpenAI-compatible provider key. |
+| `AI_GATEWAY_BASE_URL` | Yes | Gateway base URL. For Makers Models, use `https://ai-gateway.edgeone.link/v1`. |
+| `AI_GATEWAY_MODEL` | No | Model ID. Defaults to `@makers/hy3-preview` (a free built-in model). |
+| `EMAIL_PROVIDER` | No | `mock` (default) or `imap`. Controls the email data source. |
+| `IMAP_HOST` | No | IMAP server hostname (e.g. `imap.gmail.com`). Required when `EMAIL_PROVIDER=imap`. |
+| `IMAP_USER` | No | IMAP login username / email address. |
+| `IMAP_APP_PASSWORD` | No | App-specific password (Gmail: [create one here](https://myaccount.google.com/apppasswords)). |
 
-### Connecting a Real Gmail Mailbox (IMAP)
+> This template follows the **OpenAI-compatible** standard — you can point these variables at Makers Models or any other compatible gateway / provider.
 
-Follow these steps to connect your Gmail account:
+### How to get `AI_GATEWAY_API_KEY`
 
-1. **Enable 2-Step Verification**
-   - Go to [Google Account Security](https://myaccount.google.com/security)
-   - Under "How you sign in to Google", enable **2-Step Verification**
+1. Open the [Makers Console](https://edgeone.ai/makers/new?s_url=https://console.tencentcloud.com/edgeone/makers).
+2. Sign in and enable Makers.
+3. Go to **Makers → Models → API Key** and create a key.
+4. Copy it into `AI_GATEWAY_API_KEY` (set `AI_GATEWAY_BASE_URL` to `https://ai-gateway.edgeone.link/v1`).
 
-2. **Generate an App Password**
-   - Go to [App Passwords](https://myaccount.google.com/apppasswords)
-   - Select app: "Mail", select device: "Other (Custom name)" → enter "Email Assistant"
-   - Click **Generate** → copy the 16-character password (e.g. `abcd efgh ijkl mnop`)
-
-3. **Set Environment Variables**
-   ```bash
-   EMAIL_PROVIDER=imap
-   IMAP_HOST=imap.gmail.com
-   IMAP_USER=yourname@gmail.com
-   IMAP_APP_PASSWORD=abcdefghijklmnop   # remove spaces from the generated password
-   ```
-
-4. **Deploy or restart** — the next run will fetch real emails from your inbox.
-
-> **Note:** Other IMAP-compatible providers (Outlook, QQ Mail, 163, etc.) follow a similar pattern — just change `IMAP_HOST` and use the corresponding app password mechanism. For example:
-> - Outlook: `IMAP_HOST=outlook.office365.com`
-> - QQ Mail: `IMAP_HOST=imap.qq.com` (use authorization code from QQ Mail settings)
-> - 163 Mail: `IMAP_HOST=imap.163.com` (use authorization code from 163 settings)
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/email/run` | POST | SSE streaming run. Header: `makers-conversation-id` |
-| `/email/review` | POST | Resume from HITL interrupt. Header: `makers-conversation-id` |
-| `/email/history` | POST | Conversation list/get/delete. Body: `{ "action": "list" \| "get" \| "delete" }` |
-| `/email/stop` | POST | Abort active run. Header: `makers-conversation-id` |
-| `/email/scheduled` | POST | Cron-triggered daily digest |
-| `/email/health` | POST | Health check |
-
-### SSE Events
-
-```
-event: session              data: {"type":"session","conversationId":"...","task":"daily_digest"}
-event: state_update         data: {"classify":{"classified":[...]}}
-event: progress             data: {"phase":"draft","stage":"started","message":"正在起草..."}
-event: human_review_required data: {"draft":{...},"remaining":2}
-event: done                 data: {"summary":"..."}
-event: error_message        data: {"error":"..."}
-data: [PAUSED]              # Run paused (waiting for review)
-data: [DONE]                # Run completed
-data: [CANCELLED]           # Run cancelled
-```
-
-## Architecture
-
-### Backend (`agents/email/`)
-
-1. **LangGraph StateGraph** — 8 nodes orchestrating the full email processing pipeline
-2. **CrewAI Sub-pipeline** — Three-agent draft generation (filter → writer → polisher)
-3. **HITL via `interrupt()`** — Graph pauses at `review` node, resumes via `/email/review`
-4. **Dual streaming** — `stream_mode=["updates","custom"]` for both state diffs and progress narration
-5. **Email Provider abstraction** — MockProvider (fixtures) / IMAPProvider (real mailbox) via `EMAIL_PROVIDER` env
-
-### Frontend (`src/`)
-
-- `App.tsx` — SSE state machine + pipeline reducer + HITL flow orchestration
-- `api.ts` — SSE parser + conversation history CRUD + module-level cache
-- `historyStorage.ts` — localStorage-backed conversation index (instant sidebar rendering)
-- `components/ChatLayout.tsx` — Three-column responsive grid + history drawer overlay
-- `components/ConversationStream.tsx` — Message timeline with skeleton loading states
-- `components/DraftReviewCard.tsx` — Inline HITL card (approve / edit / reject / regenerate / skip)
-- `components/EmailInboxTree.tsx` — Categorized inbox with priority badges and action buttons
+Built-in models (`@makers/deepseek-v4-flash`, `@makers/hy3-preview`, `@makers/minimax-m2.7`) are free and rate-limited — great for prototyping. For production, bind your own provider key (BYOK) in the console.
 
 ## Local Development
 
-```bash
-# Install frontend dependencies
-npm install
+**Prerequisites:** Node.js, npm, Python 3.11+
 
-# Start EdgeOne local dev (frontend + backend)
-edgeone pages dev
+```bash
+npm install
+cp .env.example .env
+# Fill in AI_GATEWAY_API_KEY and AI_GATEWAY_BASE_URL in .env
+edgeone makers dev
 ```
+
+Open `http://localhost:8080/agent-metrics` for the local observability panel.
+
+## Project Structure
+
+```text
+email-assistant/
+├── agents/email/                   # Backend: Python agent handlers
+│   ├── run.py                      # /email/run — main SSE entry (fetch→classify→draft→review loop)
+│   ├── review.py                   # /email/review — HITL resume (Command(resume=decision))
+│   ├── history.py                  # /email/history — conversation list / get / delete
+│   ├── stop.py                     # /email/stop — abort active run
+│   ├── health.py                   # /email/health — liveness probe + provider info
+│   ├── _graph.py                   # LangGraph StateGraph definition & compilation
+│   ├── _state.py                   # EmailAssistantState TypedDict
+│   ├── _nodes.py                   # 7 node functions (fetch, classify, prioritize, draft, review, apply, summarize)
+│   ├── _routing.py                 # 3 conditional edge functions
+│   ├── _crew.py                    # CrewAI crew adapter (builds kickoff inputs)
+│   ├── _models.py                  # Pydantic v2 domain models (Email, DraftItem, ReviewDecision, etc.)
+│   ├── _providers.py               # EmailProvider protocol + MockProvider + IMAPProvider
+│   ├── _events.py                  # CrewAI→LangGraph event bridge (cross-thread)
+│   ├── _llm.py                     # LLM client initialization (AI Gateway)
+│   ├── _tools.py                   # CrewAI BaseTool implementations (Tone, Template, ThreadContext)
+│   ├── _crews/                     # @CrewBase crew definition (YAML agents + tasks)
+│   ├── fixtures/                   # 10 mock .eml files + user_rules.json
+│   ├── skills/                     # Skill definitions (email-tone, email-templates, triage-rules)
+│   └── prompts/                    # System prompts for LangGraph nodes
+├── src/                            # Frontend: React + Vite
+│   ├── App.tsx                     # SSE state machine + pipeline reducer
+│   ├── components/
+│   │   ├── ChatLayout.tsx          # Three-column responsive layout
+│   │   ├── EmailInboxTree.tsx      # Left: categorized inbox with search/filter
+│   │   ├── ConversationStream.tsx  # Center: message timeline + streaming bubbles
+│   │   ├── DraftReviewCard.tsx     # HITL approval card (approve/edit/reject/regenerate/skip)
+│   │   ├── NodeFlowVisualizer.tsx  # Right: pipeline node status
+│   │   ├── EmailDetailDrawer.tsx   # Slide-out email detail panel
+│   │   └── HistorySidebar.tsx      # Session history drawer
+│   ├── i18n.tsx                    # Internationalization (zh/en)
+│   └── historyStorage.ts           # localStorage conversation index
+├── edgeone.json                    # Agent runtime configuration
+├── requirements.txt                # Python dependencies
+└── package.json                    # Frontend build
+```
+
+> Files prefixed with `_` are private modules — not exposed as public routes by EdgeOne.
+
+## How It Works
+
+The agent runs as a **session-mode** Python runtime under `agents/email/`. Requests sharing the same `conversation_id` are routed to the same LangGraph checkpoint, enabling multi-request HITL loops.
+
+### Pipeline Flow
+
+```
+fetch → classify → prioritize → [draft → review → apply]* → summarize
+                                  ↑_____ regenerate _____|
+```
+
+1. **Fetch** (`/email/run`) — pulls emails from the configured provider (mock fixtures or live IMAP), auto-archives senders matching user rules.
+2. **Classify** — a single LLM batch call tags each email with category, priority (0–100), and `needs_reply` flag.
+3. **Prioritize** — applies VIP-domain boosts and user rules, filters to actionable emails, sorts by priority descending.
+4. **Draft** (per email) — a three-agent CrewAI crew runs sequentially:
+   - *Triage Analyst*: reads the email, produces a structured brief (intent, key points, suggested template/tone)
+   - *Reply Writer*: drafts the reply body using the brief + optional template
+   - *Voice Polisher*: adjusts tone, appends signature, outputs a typed `DraftItem` JSON
+5. **Review** — calls `interrupt()`, pausing the graph. The SSE stream emits `human_review_required` and closes. The frontend renders a `DraftReviewCard`.
+6. **Resume** (`/email/review`) — the user's decision (approve / edit / reject / regenerate / skip) is sent back. LangGraph resumes from the checkpoint via `Command(resume=decision)`.
+7. **Apply** — executes the decision (save draft, archive, mark read). Bumps `cursor`; if more emails remain, loops back to step 4.
+8. **Summarize** — generates a markdown digest of all actions taken.
+
+### Key Technical Details
+
+- **SSE streaming**: `stream_mode=["updates", "custom"]` — `updates` drives the pipeline visualizer; `custom` delivers real-time narration (progress events).
+- **Conversation ID**: passed via the `Makers-Conversation-Id` request header. The platform's built-in checkpointer (`context.store.langgraph_checkpointer`) persists graph state per thread.
+- **CrewAI integration**: `crew.kickoff()` is synchronous — wrapped in `asyncio.to_thread()`. Events bridged to the async loop via `loop.call_soon_threadsafe`.
+- **Timeout**: `agents.timeout = 1800` (30 min) in `edgeone.json` to accommodate long multi-email sessions.
+
+## Resources
+
+- [Makers Agents Documentation](https://pages.edgeone.ai/document/agents)
+- [Quick Start: Agent Development](https://pages.edgeone.ai/document/agents-quickstart)
+- [Makers Models](https://pages.edgeone.ai/document/models)
 
 ## License
 

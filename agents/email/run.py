@@ -8,9 +8,6 @@ time. Skeleton mirrors the marketing template's ``plan.py``:
   - on interrupt (Week 2+): ``human_review_required`` + ``[PAUSED]`` and exit
   - terminal: ``done`` with summary, then ``[DONE]``
 
-Cron path: when ``request.body._schedule`` (or ``auto_approve``) is true, the
-pipeline runs without humans — the ``review`` node auto-approves every draft.
-
 Conversation history: this handler also writes coarse-grained chat messages
 to ``ctx.store`` (via the helpers below) so ``history.py`` can list / replay
 past sessions in the left sidebar. SSE-level frames (per-node state_update)
@@ -153,7 +150,7 @@ async def handler(context):
         body = {}
 
     task = body.get("task") or "daily_digest"
-    auto_approve = bool(body.get("auto_approve") or body.get("_schedule"))
+    auto_approve = bool(body.get("auto_approve"))
 
     try:
         env = get_env(getattr(context, "env", None))

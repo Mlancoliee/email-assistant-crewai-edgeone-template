@@ -5,7 +5,7 @@ an in-memory checkpointer using a minimal one-node graph (just ``review``).
 This isolates the HITL machinery from the full pipeline so the tests are
 fast and don't need fake LLMs.
 
-Companion to test_graph.py's auto-approve test (which covers the cron path).
+Companion to test_graph.py's auto-approve test (which covers the auto_approve path).
 """
 from __future__ import annotations
 

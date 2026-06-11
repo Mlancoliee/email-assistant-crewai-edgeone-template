@@ -1,6 +1,6 @@
 /**
  * SSE event contract — keep in sync with backend handlers
- * (``run.py`` / ``review.py`` / ``scheduled.py``).
+ * (``run.py`` / ``review.py``).
  *
  * Event types:
  *   - ``session``               — first frame of every stream; carries conversationId

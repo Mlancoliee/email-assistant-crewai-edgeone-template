@@ -149,7 +149,7 @@ def test_next_or_done_completed():
 
 
 def test_review_auto_approves_pending_draft():
-    """When ``auto_approve=True`` (cron path), review skips interrupt()."""
+    """When ``auto_approve=True``, review skips interrupt()."""
     state = {"pending_review": _draft(email_id="m1"), "auto_approve": True}
     out = asyncio.run(review(state))
     assert "review_decisions" in out

@@ -59,7 +59,7 @@ class EmailAssistantState(TypedDict, total=False):
     # ─── Cursor & HITL ───
     cursor: int                          # next index into prioritized
     pending_review: Optional[DraftItem]  # current draft awaiting approval
-    auto_approve: bool                   # cron path sets True to skip interrupt()
+    auto_approve: bool                   # when True, review node auto-approves without interrupt()
 
     # ─── Final ───
     summary: str

@@ -15,7 +15,7 @@ The bracketed group is the per-email loop driven by ``cursor`` and the
 Day 3 covers the first three (offline-friendly) nodes. Day 4 lands
 ``draft_with_crew``; Day 5 lands ``apply``, ``summarize``, plus an
 auto-approve ``review`` stub. Week 2 D1 promotes ``review`` to a true
-HITL pause via ``langgraph.types.interrupt`` (with a cron escape hatch).
+HITL pause via ``langgraph.types.interrupt``.
 """
 from __future__ import annotations
 
@@ -754,7 +754,7 @@ def _placeholder_draft(
     )
 
 
-# ─── review (HITL — pauses via interrupt(), or auto-approves on cron) ────────
+# ─── review (HITL — pauses via interrupt(), or auto-approves) ─────────────────
 
 
 async def review(state: EmailAssistantState) -> dict:
@@ -772,9 +772,9 @@ async def review(state: EmailAssistantState) -> dict:
        which re-enters this node — ``interrupt()`` now returns ``value``
        instead of pausing.
 
-    2. **auto-approve** (cron): when ``state.auto_approve == True`` (set by
-       the morning-digest cron path), skip the interrupt entirely so daily
-       digests don't block on humans. Every draft gets ``action="approve"``.
+    2. **auto-approve** (testing): when ``state.auto_approve == True`` (set by
+       the caller explicitly), skip the interrupt entirely so the pipeline
+       runs to completion without blocking on humans.
 
     The resume value contract (from ``review.py``):
 

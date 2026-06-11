@@ -6,8 +6,8 @@ openai_client) via ``functools.partial``, and compiles with the platform's
 built-in checkpointer (``ctx.store.langgraph_checkpointer``).
 
 ``get_graph`` is the **caller-facing entry point** — it caches the
-compiled graph at module level so all handlers (``run.py`` / ``review.py`` /
-``scheduled.py``) share one instance. This matches the pattern used in the
+compiled graph at module level so all handlers (``run.py`` / ``review.py``)
+share one instance. This matches the pattern used in the
 sibling reference templates (``langgraph-quiz-python``,
 ``crewai-planner-python``) and is critical for HITL: a fresh compiled
 graph per request would reset LangGraph's internal channel versions and
